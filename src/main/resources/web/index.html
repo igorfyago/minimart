@@ -40,7 +40,10 @@
     padding:9px 0; border-radius:9px; cursor:pointer; font-size:13.5px; font-family:inherit; }
   button.buy:hover { filter:brightness(1.1); }
   button.buy:disabled { background:#243044; color:var(--dim); cursor:not-allowed; }
-  .stats { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(160px,100%),1fr)); gap:12px; }
+  /* every row the same height, so a card left alone on the last row does not
+     shrink to fit its own text and make the set look ragged */
+  .stats { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(160px,100%),1fr));
+    gap:12px; grid-auto-rows:1fr; }
   .stat { background:#0b0f16; border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
   .stat .k { font-size:10.5px; color:var(--dim); text-transform:uppercase; letter-spacing:.07em; }
   .stat .v { font-size:26px; font-weight:750; color:var(--green); font-variant-numeric:tabular-nums; line-height:1.2; }
