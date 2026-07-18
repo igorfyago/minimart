@@ -131,6 +131,25 @@ hand-written pool the digests match and the run is twice as fast.
 standing at the processor, holding a customer's money for a product they no longer had. An abandoned cart has to
 release both sides of the seam.
 
+**Subscription billing (done, 4/4 lessons green).** One design rule kept this small: **a renewal is not a special
+case, it is an order.** Every period runs through the same checkout a browsing customer uses, with an order id
+derived from (subscription, period), so the reservation, the authorisation, the capture and every idempotency gate
+are reused exactly as they are. Recurring billing needed no money path of its own.
+
+- *180 compressed days* → 7 billing periods, 553.00 captured at the processor, in milliseconds of wall clock.
+- *the scheduler fires five times on the same due date* → one invoice, one charge. The invoice
+  `UNIQUE(subscription_id, period_index)` claims the period; the derived order id makes the checkout underneath
+  idempotent anyway.
+- *a declining card* → three scheduled retries on a backoff ladder in business time, then involuntary churn, with
+  no stock consumed by a payment that never succeeded.
+- *cancel at period end* → the paid period stands, the next one never bills.
+
+A bug worth recording: the first version rewound `period_index` on failure, so every retry billed a *different*
+period and the attempt counter never accumulated, meaning dunning could never give up. `period_index` is now
+strictly "the last period successfully billed", and a failed attempt does not move it.
+
 ### Next
-- **Slice 4.** Order saga over Kafka via the transactional outbox.
-- **Slices 5-6.** MRR movement ledger, then billing (a renewal is just an order with a derived id).
+- **MRR movement ledger and cohort analytics.** new, expansion, contraction, churn, reactivation, computed from events.
+- **The order saga over Kafka**, via the transactional outbox, so fulfilment stops being synchronous.
+- **Experiments** with A/A calibration before any readout is believed.
+- **The consultation agent**, recommending products and plans, with a human review step for anything clinical.

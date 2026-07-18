@@ -39,6 +39,11 @@ public final class PaymentIntents {
     /** Authorise: money moves from the funding source into a hold. */
     public static Result authorize(String id, BigDecimal amount, String currency,
                                    String customer, String merchant, Instant businessAt) throws SQLException {
+        // Test instruments, the way every processor provides them: a customer
+        // whose reference says "decline" always declines, so failure paths can
+        // be exercised deterministically instead of hoped for.
+        if (customer.contains("decline")) return new Declined("card_declined");
+
         try (Connection c = PayDb.open()) {
             c.setAutoCommit(false);
             try {

@@ -40,6 +40,15 @@ public final class Checkout {
     public static volatile String payBaseUrl =
             System.getenv().getOrDefault("MINIPAY_URL", "http://localhost:8082");
 
+    /** Customers whose payment instrument always declines. A simulated economy
+     *  needs failing cards as much as working ones: dunning, involuntary churn
+     *  and recovery cannot be exercised by a population that always pays. */
+    public static final java.util.Set<Long> declineCustomerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    static String customerRef(long customerId) {
+        return declineCustomerIds.contains(customerId) ? "cust_decline_" + customerId : "cust_" + customerId;
+    }
+
     private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(2)).build();
 
@@ -60,7 +69,7 @@ public final class Checkout {
             // The idempotency key is derived from the order, so a retry of this
             // whole checkout authorises once, no matter how many times it runs.
             String body = "{\"id\":\"" + pi + "\",\"amount\":\"" + ok.amount().toPlainString() +
-                          "\",\"customer\":\"cust_" + customerId + "\",\"merchant\":\"" + tenant +
+                          "\",\"customer\":\"" + customerRef(customerId) + "\",\"merchant\":\"" + tenant +
                           "\",\"business_at\":\"" + businessAt + "\"}";
             HttpResponse<String> r = http.send(
                     HttpRequest.newBuilder(URI.create(payBaseUrl + "/v1/payment_intents"))
