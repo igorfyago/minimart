@@ -96,6 +96,18 @@ processor take the money?" by checking whether `payment_intent_id` was set. But 
 authorisation *succeeds*, so the compensation path saw NULL and tried to refund a wallet that was never charged.
 How an order is paid is a fact fixed when the order is created, not one inferred afterwards from a success artifact.
 
+**Slice 3 · the HTTP surface (done).** Everything an agent customer will touch is now a real endpoint, with no
+privileged back door for the simulation: `GET /api/catalog`, `POST /api/checkout`, `POST /api/orders/{id}/ship`
+and `/cancel`, `POST /api/stock`, `GET /api/audit`, and `POST /api/sim/tick`, which runs the time-driven jobs as a
+single deterministic pass at a tick boundary instead of a background loop. That is what makes a compressed run
+reproducible. `mvn exec:java` boots the merchant on :8081 and the processor on :8082.
+
+**A bug the audits caught, live.** Driving a real purchase through the API turned `/api/audit` red:
+`sum_zero_violations: 2`. The supplier account was `supplier:{tenant}` with no variant in the key. An account holds
+exactly one currency, so the first delivery pinned it to `UNIT:v-mots-10mg`, and receiving any *other* product then
+posted a foreign-currency leg into it. Every existing test passed, because each one used a single product. Audit 1
+found it the moment a second product existed. Suppliers are now per variant, with a regression lesson.
+
 ### Next
 - **Slice 4.** Order saga over Kafka via the transactional outbox.
 - **Slices 5-6.** MRR movement ledger, then billing (a renewal is just an order with a derived id).

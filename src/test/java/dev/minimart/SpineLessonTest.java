@@ -167,6 +167,27 @@ class SpineLessonTest {
         System.out.println("lesson 4: abort (twice) restores wallet and shelf exactly · books balance");
     }
 
+    /** LESSON 5 · one currency per account. Caught in the wild by audit 1.
+     *  A per-tenant supplier account gets pinned to whichever variant arrives
+     *  first, and every later variant then posts a foreign-currency leg into it.
+     *  The books stop summing to zero and no test using a single product notices. */
+    @Test
+    void lesson5_two_variants_from_one_supplier_keep_the_books_clean() throws Exception {
+        try (Connection c = Db.open(); var st = c.createStatement()) {
+            st.execute("INSERT INTO variants(id, tenant, title, price) VALUES ('v-focus-30','" + TENANT + "','Focus Stack', 89.00)");
+        }
+        Orders.receiveStock(TENANT, LOC, VARIANT, 10, T0);
+        Orders.receiveStock(TENANT, LOC, "v-focus-30", 25, T0);
+
+        try (Connection c = Db.open()) {
+            assertEquals(10, Ledger.balance(c, Orders.onHand(LOC, VARIANT)).intValueExact());
+            assertEquals(25, Ledger.balance(c, Orders.onHand(LOC, "v-focus-30")).intValueExact());
+            assertTrue(Ledger.sumZeroViolations(c).isEmpty(),
+                    "each variant has its own supplier account, so each currency balances");
+        }
+        System.out.println("lesson 5: two variants received from one tenant · one currency per account, books clean");
+    }
+
     private static long count(Connection c, String sql) throws Exception {
         try (PreparedStatement ps = c.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
             rs.next(); return rs.getLong(1);

@@ -54,19 +54,24 @@ public final class Orders {
 
     // ------------------------------------------------------------- setup ops
 
+    /** The supplier of ONE variant. An account holds exactly one currency, so a
+     *  per-tenant supplier account would be pinned to whichever variant arrived
+     *  first and every later variant would post a foreign-currency leg into it. */
+    public static String supplier(String tenant, String variantId) { return "supplier:" + tenant + ':' + variantId; }
+
     /** Goods arrive from a supplier (an external account, so it may go negative). */
     public static void receiveStock(String tenant, String location, String variantId, long qty, Instant businessAt)
             throws SQLException {
         try (Connection c = Db.open()) {
             c.setAutoCommit(false);
-            Ledger.ensureAccount(c, "supplier:" + tenant, "external", unit(variantId));
+            Ledger.ensureAccount(c, supplier(tenant, variantId), "external", unit(variantId));
             Ledger.ensureAccount(c, onHand(location, variantId), "stock", unit(variantId));
             Ledger.ensureAccount(c, reserved(location, variantId), "stock", unit(variantId));
             Ledger.ensureAccount(c, sold(location, variantId), "stock", unit(variantId));
             UUID tx = derive("receive:" + location + ':' + variantId + ':' + qty + ':' + businessAt);
             if (Ledger.claimTx(c, tx, "stock.received", businessAt)) {
                 Ledger.post(c, tx, businessAt, List.of(
-                        new Ledger.Leg("supplier:" + tenant, BigDecimal.valueOf(-qty)),
+                        new Ledger.Leg(supplier(tenant, variantId), BigDecimal.valueOf(-qty)),
                         new Ledger.Leg(onHand(location, variantId), BigDecimal.valueOf(qty))));
             }
             c.commit();
