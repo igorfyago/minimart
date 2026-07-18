@@ -34,6 +34,13 @@ public final class PayApi {
         HttpServer s = HttpServer.create(new InetSocketAddress(port), 0);
         s.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         s.createContext("/v1/payment_intents", PayApi::intents);
+        // The processor's customer and payment-method surface, shaped after the
+        // API a merchant has almost certainly integrated before: a Customer
+        // holds PaymentMethods, and a PaymentIntent charges one of them. A
+        // familiar shape is not decoration, it is the difference between an
+        // integration that takes an afternoon and one that takes a week.
+        s.createContext("/v1/customers", PayApi::customers);
+        s.createContext("/v1/payment_methods", PayApi::paymentMethods);
         s.createContext("/v1/balance", PayApi::balance);
         s.createContext("/v1/list", PayApi::list);
         s.createContext("/v1/keys", PayApi::keys);
@@ -240,4 +247,53 @@ public final class PayApi {
         ex.getResponseBody().write(b);
         ex.close();
     }
+
+    /** Find or create the processor's customer for a merchant's own reference. */
+    private static void customers(HttpExchange ex) throws IOException {
+        try {
+            String body = read(ex);
+            String merchant = Json.str(body, "merchant"), ref = Json.str(body, "customer_ref");
+            if (merchant == null || ref == null) { send(ex, 400, "{\"error\":\"need merchant, customer_ref\"}"); return; }
+            PaymentMethods.Customer c = PaymentMethods.customer(merchant, ref);
+            send(ex, 200, "{\"id\":\"" + c.id() + "\",\"merchant_ref\":\"" + Json.esc(c.merchantRef()) + "\"}");
+        } catch (Exception e) { send(ex, 500, err(String.valueOf(e.getMessage()))); }
+    }
+
+    /**
+     * Attach a way of paying.
+     *
+     * The RAIL is fixed here, once, from where the instrument came from. A rail
+     * inferred later from the shape of a token would be a guess, and a guess
+     * about which bank to ask works until somebody changes a token format.
+     */
+    private static void paymentMethods(HttpExchange ex) throws IOException {
+        try {
+            String body = read(ex);
+            String customer = Json.str(body, "customer");
+            String type = Json.str(body, "type");
+            if (customer == null) { send(ex, 400, "{\"error\":\"need customer\"}"); return; }
+
+            PaymentMethods.Method m;
+            if ("wallet".equals(type)) {
+                m = PaymentMethods.attachWallet(customer);
+            } else {
+                String rail = Json.str(body, "rail");
+                String instrument = Json.str(body, "instrument");
+                if (rail == null || instrument == null) {
+                    send(ex, 400, "{\"error\":\"a card needs rail and instrument\"}");
+                    return;
+                }
+                m = PaymentMethods.attachCard(customer, rail, instrument,
+                        orElse(Json.str(body, "brand_label"), "card"),
+                        orElse(Json.str(body, "last4"), "0000"));
+            }
+            send(ex, 200, "{\"id\":\"" + m.id() + "\",\"type\":\"" + m.type()
+                    + "\",\"rail\":\"" + m.rail()
+                    + "\",\"brand_label\":\"" + Json.esc(String.valueOf(m.brandLabel()))
+                    + "\",\"last4\":\"" + Json.esc(String.valueOf(m.last4())) + "\"}");
+        } catch (Exception e) { send(ex, 500, err(String.valueOf(e.getMessage()))); }
+    }
+
+    private static String orElse(String v, String fallback) { return v == null || v.isBlank() ? fallback : v; }
+
 }
