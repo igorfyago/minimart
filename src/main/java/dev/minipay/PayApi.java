@@ -41,6 +41,11 @@ public final class PayApi {
         // integration that takes an afternoon and one that takes a week.
         s.createContext("/v1/customers", PayApi::customers);
         s.createContext("/v1/payment_methods", PayApi::paymentMethods);
+        // The two batch jobs, exposed so they can be run on a schedule or by
+        // hand. Both are idempotent per business day, so an operator running one
+        // twice is not a way to pay somebody twice.
+        s.createContext("/v1/clearing/run", PayApi::clearingRun);
+        s.createContext("/v1/settlements/run", PayApi::settlementRun);
         s.createContext("/v1/balance", PayApi::balance);
         s.createContext("/v1/list", PayApi::list);
         s.createContext("/v1/keys", PayApi::keys);
@@ -252,6 +257,46 @@ public final class PayApi {
         ex.sendResponseHeaders(status, b.length);
         ex.getResponseBody().write(b);
         ex.close();
+    }
+
+
+    /** Build the day's clearing batch and send it to the issuer. */
+    private static void clearingRun(HttpExchange ex) throws IOException {
+        try {
+            String body = read(ex);
+            java.time.LocalDate day = java.time.LocalDate.parse(
+                    orElse(Json.str(body, "business_date"), java.time.LocalDate.now().toString()));
+            String currency = orElse(Json.str(body, "currency"), "EUR");
+            java.time.Instant at = businessAt(body);
+
+            Clearing.Batch built = Clearing.build(orElse(Json.str(body, "issuer"), "minibank"), currency, day, at);
+            if (built == null) { send(ex, 200, "{\"cleared\":false,\"reason\":\"nothing to clear\"}"); return; }
+            Clearing.Batch acked = Clearing.submit(built.id(), at);
+            send(ex, 200, "{\"batch\":\"" + acked.id() + "\",\"state\":\"" + acked.state()
+                    + "\",\"items\":" + acked.items()
+                    + ",\"gross\":\"" + acked.gross().toPlainString()
+                    + "\",\"interchange\":\"" + acked.interchange().toPlainString()
+                    + "\",\"net\":\"" + acked.net().toPlainString()
+                    + "\",\"issuer_net\":" + (acked.issuerNet() == null ? "null"
+                        : "\"" + acked.issuerNet().toPlainString() + "\"")
+                    + ",\"agreed\":" + acked.agreed() + "}");
+        } catch (Exception e) { send(ex, 500, err(String.valueOf(e.getMessage()))); }
+    }
+
+    /** Pay a merchant for a business day, net of this processor's fee. */
+    private static void settlementRun(HttpExchange ex) throws IOException {
+        try {
+            String body = read(ex);
+            java.time.LocalDate day = java.time.LocalDate.parse(
+                    orElse(Json.str(body, "business_date"), java.time.LocalDate.now().toString()));
+            Settlements.Batch b = Settlements.run(orElse(Json.str(body, "merchant"), "helix"),
+                    orElse(Json.str(body, "currency"), "EUR"), day, businessAt(body));
+            if (b == null) { send(ex, 200, "{\"settled\":false,\"reason\":\"nothing to settle\"}"); return; }
+            send(ex, 200, "{\"settlement\":\"" + b.id() + "\",\"items\":" + b.items()
+                    + ",\"gross\":\"" + b.gross().toPlainString()
+                    + "\",\"fee\":\"" + b.fee().toPlainString()
+                    + "\",\"net\":\"" + b.net().toPlainString() + "\"}");
+        } catch (Exception e) { send(ex, 500, err(String.valueOf(e.getMessage()))); }
     }
 
     /** Find or create the processor's customer for a merchant's own reference. */
