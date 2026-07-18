@@ -37,6 +37,9 @@ public final class Orders {
 
     public static final Duration RESERVATION_TTL = Duration.ofMinutes(30);
 
+    /** Order lifecycle events. Partitioned by order id, so per-order ordering holds. */
+    public static final String TOPIC_ORDERS = "minimart.orders";
+
     private Orders() {}
 
     // ---------------------------------------------------------------- refs
@@ -154,6 +157,15 @@ public final class Orders {
                     ps.setTimestamp(7, java.sql.Timestamp.from(businessAt));
                     ps.executeUpdate();
                 }
+                // The announcement joins THIS transaction. If anything above
+                // rolls back, the world is never told about an order that did
+                // not happen. Keyed by order id, so a later cancellation can
+                // never overtake its own placement on the topic.
+                dev.minimart.core.Outbox.append(c, TOPIC_ORDERS, orderId.toString(),
+                        "{\"type\":\"order.placed\",\"orderId\":\"" + orderId + "\",\"tenant\":\"" + tenant +
+                        "\",\"customer\":" + customerId + ",\"variant\":\"" + variantId + "\",\"qty\":" + qty +
+                        ",\"amount\":\"" + amount.toPlainString() + "\",\"at\":\"" + businessAt + "\"}",
+                        businessAt);
                 c.commit();
                 return new Ok(orderId, amount);
             } catch (Ledger.Insufficient e) {
@@ -228,6 +240,12 @@ public final class Orders {
                         "UPDATE orders SET state = ? WHERE id = ?")) {
                     ps.setString(1, orderState); ps.setObject(2, orderId); ps.executeUpdate();
                 }
+                dev.minimart.core.Outbox.append(c, TOPIC_ORDERS, orderId.toString(),
+                        "{\"type\":\"order." + orderState + "\",\"orderId\":\"" + orderId +
+                        "\",\"tenant\":\"" + tenant + "\",\"customer\":" + customerId +
+                        ",\"variant\":\"" + variantId + "\",\"qty\":" + qty +
+                        ",\"amount\":\"" + amount.toPlainString() + "\",\"at\":\"" + businessAt + "\"}",
+                        businessAt);
                 c.commit();
             } catch (SQLException | RuntimeException e) {
                 c.rollback();
