@@ -64,15 +64,27 @@ class PaymentIntentLessonTest {
         assertEquals(200, captured.statusCode());
         assertTrue(captured.body().contains("\"status\":\"succeeded\""));
 
+        // CAPTURE DOES NOT PAY THE MERCHANT. The hold is gone, because the
+        // cardholder's money has been taken, and what the merchant has is a
+        // RECEIVABLE: they are paid later, in a batch, net of a fee. A
+        // processor that made this "available" the moment it captured would be
+        // a wallet with good manners, and every merchant's payout would
+        // reconcile to the wrong number.
         bal = get("/v1/balance?merchant=helix");
         assertTrue(bal.body().contains("\"pending\":\"0.00\""), bal.body());
-        assertTrue(bal.body().contains("\"available\":\"40.00\""), bal.body());
+        assertTrue(bal.body().contains("\"available\":\"0.00\""),
+                "not paid out yet, because a settlement has not run: " + bal.body());
+        try (Connection c = PayDb.open()) {
+            assertEquals(0, new java.math.BigDecimal("40.00").compareTo(
+                            Ledger.balance(c, dev.minipay.Settlements.receivable("helix"))),
+                    "but it IS owed to them, in full, before any fee is taken");
+        }
 
         try (Connection c = PayDb.open()) {
             assertTrue(Ledger.sumZeroViolations(c).isEmpty());
             assertTrue(Ledger.driftedAccounts(c).isEmpty());
         }
-        System.out.println("lesson 1: authorise holds 40.00, capture makes it available · books balance");
+        System.out.println("lesson 1: authorise holds 40.00, capture makes it OWED, not paid · books balance");
     }
 
     /** LESSON 2 · the lost response. The retry gets the identical answer, and charges once. */

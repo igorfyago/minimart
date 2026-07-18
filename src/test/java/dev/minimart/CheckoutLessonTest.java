@@ -88,9 +88,9 @@ class CheckoutLessonTest {
             assertEquals(0, Ledger.balance(c, Orders.reserved(LOC, VARIANT)).intValueExact());
         }
         try (Connection c = PayDb.open()) {
-            assertEquals(new BigDecimal("80.00"),
-                    Ledger.balance(c, PaymentIntents.balance(TENANT)).stripTrailingZeros().setScale(2),
-                    "captured: now it is really the merchant's");
+            assertEquals(0, new java.math.BigDecimal("80.00").compareTo(owedToMerchant("helix")),
+                    "captured: the merchant is now OWED it. A capture takes the cardholder's money and does not "
+                    + "pay the merchant, who is paid later by a settlement run, net of fees.");
             assertEquals(0, Ledger.balance(c, PaymentIntents.holds(TENANT)).signum());
             assertTrue(Ledger.sumZeroViolations(c).isEmpty());
         }
@@ -187,6 +187,14 @@ class CheckoutLessonTest {
     private static long count(Connection c, String sql) throws Exception {
         try (PreparedStatement ps = c.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
             rs.next(); return rs.getLong(1);
+        }
+    }
+
+    /** What the processor OWES this merchant. A capture creates the debt; a
+     *  settlement run turns it into a payout, net of fees. */
+    private static java.math.BigDecimal owedToMerchant(String merchant) throws Exception {
+        try (java.sql.Connection c = dev.minipay.PayDb.open()) {
+            return dev.minimart.core.Ledger.balance(c, dev.minipay.Settlements.receivable(merchant));
         }
     }
 }

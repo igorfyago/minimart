@@ -80,8 +80,8 @@ class BillingLessonTest {
         }
         try (Connection c = PayDb.open()) {
             assertEquals(new BigDecimal("553.00"),
-                    Ledger.balance(c, PaymentIntents.balance(TENANT)).stripTrailingZeros().setScale(2),
-                    "7 x 79.00 captured at the processor");
+                    Ledger.balance(c, dev.minipay.Settlements.receivable(TENANT)).stripTrailingZeros().setScale(2),
+                    "7 x 79.00 captured at the processor and owed to the merchant, who is paid at settlement");
             assertTrue(Ledger.sumZeroViolations(c).isEmpty());
         }
         System.out.println("lesson 1: 180 compressed days · " + renewed + " billing periods, 553.00 captured");
@@ -101,7 +101,7 @@ class BillingLessonTest {
         }
         try (Connection c = PayDb.open()) {
             assertEquals(new BigDecimal("79.00"),
-                    Ledger.balance(c, PaymentIntents.balance(TENANT)).stripTrailingZeros().setScale(2),
+                    Ledger.balance(c, dev.minipay.Settlements.receivable(TENANT)).stripTrailingZeros().setScale(2),
                     "charged once, not five times");
         }
         System.out.println("lesson 2: five firings of the same due period · one invoice, one charge");

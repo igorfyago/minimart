@@ -32,6 +32,12 @@ public final class PaymentIntents {
     public static String holds(String merchant)   { return "holds:" + merchant; }
     public static String balance(String merchant) { return "balance:" + merchant; }
 
+    /** Where card money comes FROM, as far as this processor's books are
+     *  concerned. It is external because the money genuinely is: it sits at an
+     *  issuer until clearing brings it, and pretending otherwise would put a
+     *  euro on two banks' books at once. */
+    public static String scheme() { return "scheme:settlement"; }
+
     private PaymentIntents() {}
 
     private static UUID derive(String s) { return UUID.nameUUIDFromBytes(s.getBytes(StandardCharsets.UTF_8)); }
@@ -65,6 +71,20 @@ public final class PaymentIntents {
         // be exercised deterministically instead of hoped for.
         if (customer.contains("decline")) return new Declined("card_declined");
 
+        // ASK WHETHER WE ALREADY KNOW THIS PAYMENT BEFORE ASKING A BANK ABOUT IT.
+        //
+        // The first version asked the rail first and only then tried to insert.
+        // A retried intent id therefore placed a REAL hold against a real
+        // cardholder's credit limit, hit the insert conflict, rolled back, and
+        // threw the authorisation reference away. Nothing afterwards could
+        // capture or void a reference nobody had stored, so the customer's
+        // credit was consumed permanently by a purchase that never existed, and
+        // they would have found out at the next till.
+        //
+        // The common case is now settled without troubling an issuer at all.
+        Result existing = existingIntent(id);
+        if (existing != null) return existing;
+
         String rail = "WALLET";
         String authorizationRef = null;
         if (paymentMethodId != null) {
@@ -92,6 +112,7 @@ public final class PaymentIntents {
             c.setAutoCommit(false);
             try {
                 Ledger.ensureAccount(c, source(customer), "external", currency);
+                Ledger.ensureAccount(c, scheme(), "external", currency);
                 Ledger.ensureAccount(c, holds(merchant), "holds", currency);
                 Ledger.ensureAccount(c, balance(merchant), "merchant", currency);
 
@@ -103,9 +124,16 @@ public final class PaymentIntents {
                     ps.setString(4, customer); ps.setString(5, merchant);
                     ps.setTimestamp(6, java.sql.Timestamp.from(businessAt));
                     ps.setString(7, paymentMethodId); ps.setString(8, finalRail); ps.setString(9, finalAuthRef);
-                    if (ps.executeUpdate() == 0) {   // already exists: report its current state
+                    if (ps.executeUpdate() == 0) {
+                        // Somebody inserted between our check and this insert.
+                        // Rare, and it still must not strand a hold: we asked a
+                        // bank for money a moment ago and we are about to stop
+                        // owning the record that could ever release it, so we
+                        // give it back before we let go.
                         c.rollback();
-                        return get(id);
+                        if (finalAuthRef != null) Rails.release(finalRail, finalAuthRef, businessAt);
+                        Result now = existingIntent(id);
+                        return now != null ? now : new WrongState(id, "unknown");
                     }
                 }
                 // The processor's own ledger models money it is actually
@@ -130,6 +158,32 @@ public final class PaymentIntents {
             } catch (SQLException | RuntimeException e) {
                 c.rollback();
                 throw e;
+            }
+        }
+    }
+
+    /**
+     * The state this intent is already in, or null if it is new.
+     *
+     * A DECLINED intent is reported as declined, not as Ok. The first version
+     * routed every existing row through get(), which wraps any status in Ok, so
+     * a merchant asking again about a payment that had failed was told 200 and
+     * shipped the goods. A processor that reports a failure as a success is
+     * worse than one that fails.
+     */
+    private static Result existingIntent(String id) throws SQLException {
+        try (Connection c = PayDb.open();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT status, amount, decline_reason FROM payment_intents WHERE id = ?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                String status = rs.getString(1);
+                if ("declined".equals(status)) {
+                    String why = rs.getString(3);
+                    return new Declined(why == null ? "declined" : why);
+                }
+                return new Ok(id, status, rs.getBigDecimal(2));
             }
         }
     }
@@ -193,13 +247,39 @@ public final class PaymentIntents {
                         : Rails.release(rail, authRef, businessAt);
                 if (!railOk) { c.rollback(); return new Declined("issuer unavailable"); }
 
+                // A CAPTURE TAKES THE CARDHOLDER'S MONEY. IT DOES NOT PAY THE
+                // MERCHANT.
+                //
+                // The merchant is paid later, in a batch, net of a fee, by a
+                // settlement run. Collapsing the two is the most common way a
+                // payments simulation stops being one, because it skips the
+                // fee, skips the delay, and quietly asserts that a processor is
+                // a wallet. So what a capture creates is a RECEIVABLE: money
+                // this processor owes the merchant and has not yet handed over.
+                //
+                // The receivable exists on every rail. On a card the money is
+                // at the issuer and arrives with the clearing; on a wallet it
+                // is already here. What the merchant is owed is the same
+                // question either way, which is exactly why it belongs in one
+                // account rather than in a branch.
                 UUID tx = derive((capture ? "capture:" : "cancel:") + id);
-                if ("WALLET".equals(rail) && Ledger.claimTx(c, tx, capture ? "payment.captured" : "payment.canceled", businessAt)) {
-                    Ledger.post(c, tx, businessAt, capture
-                            ? List.of(new Ledger.Leg(holds(merchant), amount.negate()),
-                                      new Ledger.Leg(balance(merchant), amount))
-                            : List.of(new Ledger.Leg(holds(merchant), amount.negate()),
-                                      new Ledger.Leg(source(customer), amount)));
+                Ledger.ensureAccount(c, Settlements.receivable(merchant), "receivable", currency);
+                if (Ledger.claimTx(c, tx, capture ? "payment.captured" : "payment.canceled", businessAt)) {
+                    if (capture) {
+                        Ledger.post(c, tx, businessAt, "WALLET".equals(rail)
+                                // the funds were held here, so they move here
+                                ? List.of(new Ledger.Leg(holds(merchant), amount.negate()),
+                                          new Ledger.Leg(Settlements.receivable(merchant), amount))
+                                // the funds are at the ISSUER. What exists here
+                                // is the claim on them, balanced against the
+                                // scheme this processor will collect from.
+                                : List.of(new Ledger.Leg(scheme(), amount.negate()),
+                                          new Ledger.Leg(Settlements.receivable(merchant), amount)));
+                    } else if ("WALLET".equals(rail)) {
+                        Ledger.post(c, tx, businessAt, List.of(
+                                new Ledger.Leg(holds(merchant), amount.negate()),
+                                new Ledger.Leg(source(customer), amount)));
+                    }
                 }
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE payment_intents SET status = ?, settled_at = ? WHERE id = ?")) {

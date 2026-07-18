@@ -276,6 +276,78 @@ class RailsLessonTest {
         System.out.println("lesson 6: four attempts at one payment left exactly one hold of 300");
     }
 
+
+    /**
+     * LESSON 7 · A RETRIED PAYMENT NEVER STRANDS A HOLD.
+     *
+     * Found by review, and it was the most expensive bug in the payment path.
+     * The first version asked the rail BEFORE checking whether it already knew
+     * this payment. A customer whose first attempt declined and who tried again
+     * caused a REAL hold against their real credit limit, then the acquirer's
+     * insert conflicted, the transaction rolled back, and the authorisation
+     * reference was thrown away. Nothing afterwards could capture or void a
+     * reference nobody had stored, so the credit was consumed permanently by a
+     * purchase that never existed and the customer would have found out at the
+     * next till.
+     *
+     * Two things fix it and both are asserted here: the common case is answered
+     * without troubling an issuer at all, and a declined payment is reported as
+     * declined rather than as a success.
+     */
+    @Test
+    void lesson7_a_retried_payment_leaves_no_hold_nobody_can_release() throws Exception {
+        String token = "mbc_retry_safe";
+        limits.put(token, new BigDecimal("1000.00"));
+        var cus = PaymentMethods.customer(MERCHANT, "retry-safe");
+        var pm = PaymentMethods.attachCard(cus.id(), "ON_US", token, "minibank credit", "3333");
+
+        // the first attempt fails because the bank is unreachable
+        Rails.issuerUnreachable = true;
+        String intent = "pi_" + UUID.randomUUID();
+        assertInstanceOf(PaymentIntents.Declined.class,
+                PaymentIntents.authorize(intent, new BigDecimal("100.00"), "EUR", "retry-safe", MERCHANT, pm.id(), T0));
+
+        // the bank comes back and the customer tries the same order again
+        Rails.issuerUnreachable = false;
+        int callsBefore = issuerCalls.get();
+        var again = PaymentIntents.authorize(intent, new BigDecimal("100.00"), "EUR", "retry-safe", MERCHANT, pm.id(), T0);
+
+        assertInstanceOf(PaymentIntents.Declined.class, again,
+                "A DECLINED PAYMENT REPORTS DECLINED, not success. Reporting it as Ok would have the merchant ship.");
+        assertEquals(callsBefore, issuerCalls.get(),
+                "and the issuer was not troubled again, so no second hold could be created");
+        assertEquals(0, authState.size(), "NO HOLD EXISTS ANYWHERE for a payment that never succeeded");
+        assertEquals(0, new BigDecimal("1000.00").compareTo(remaining(token)),
+                "the customer's credit limit is exactly as it was");
+        System.out.println("lesson 7: a declined payment retried left no hold and reported declined");
+    }
+
+    /**
+     * LESSON 8 · THE SAME REFERENCE MUST MEAN THE SAME MONEY.
+     *
+     * The issuer treats a repeated authorisation reference as a retry and
+     * answers identically. That is right, and it becomes dangerous if the
+     * amount is not checked: a reference reused for a larger sum was approved
+     * against the smaller hold that actually existed, and the difference was
+     * authorised by nobody.
+     */
+    @Test
+    void lesson8_a_reference_reused_for_a_different_amount_is_refused() throws Exception {
+        String token = "mbc_amount_check";
+        limits.put(token, new BigDecimal("1000.00"));
+        UUID ref = UUID.randomUUID();
+
+        // this test speaks to the stand-in issuer directly, because the acquirer
+        // derives its references and would never reuse one this way. The issuer
+        // must still refuse it: a bank does not rely on its callers behaving.
+        assertTrue(authorizeDirect(ref, token, "100.00"), "the first authorisation for 100");
+        assertFalse(authorizeDirect(ref, token, "500.00"),
+                "THE SAME REFERENCE FOR 500 IS REFUSED, or 400 would be authorised by nobody");
+        assertEquals(0, new BigDecimal("900.00").compareTo(remaining(token)),
+                "and only the original 100 is held");
+        System.out.println("lesson 8: a reference reused for a larger amount was refused by the issuer");
+    }
+
     // ------------------------------------------------------- the stand-in bank
 
     /** minibank's real protocol, answered by a stand-in, so these lessons do
@@ -310,8 +382,20 @@ class RailsLessonTest {
         String authId = Json.str(body, "authorization_id");
         BigDecimal amount = new BigDecimal(Json.str(body, "amount"));
 
-        if (authState.containsKey(authId)) {          // a retry is the same authorisation
-            respond(ex, 200, "{\"authorization\":\"" + authId + "\",\"approved\":true}");
+        if (authState.containsKey(authId)) {
+            // A RETRY IS THE SAME AUTHORISATION, AND ONLY IF IT IS THE SAME
+            // MONEY. The first version of this stand-in answered from the state
+            // alone, which is exactly the bug the real issuer had, so the fake
+            // agreed with the mistake and hid it. A stand-in that shares the
+            // code under test's assumptions is not a test.
+            BigDecimal held = authAmount.get(authId);
+            if (held == null || held.compareTo(amount) != 0) {
+                respond(ex, 200, "{\"approved\":false,\"reason\":\"authorization reference reused for a different amount\"}");
+                return;
+            }
+            String state = authState.get(authId);
+            boolean live = "approved".equals(state) || "captured".equals(state);
+            respond(ex, 200, "{\"authorization\":\"" + authId + "\",\"approved\":" + live + "}");
             return;
         }
         BigDecimal left = limits.get(token);
@@ -334,6 +418,19 @@ class RailsLessonTest {
     }
 
     // ------------------------------------------------------------------ reads
+
+    /** Speak to the issuer directly, as a second acquirer would. */
+    private static boolean authorizeDirect(UUID ref, String token, String amount) throws Exception {
+        var body = "{\"instrument\":\"" + token + "\",\"authorization_id\":\"" + ref
+                + "\",\"amount\":\"" + amount + "\",\"currency\":\"EUR\",\"business_at\":\"" + T0 + "\"}";
+        var http = java.net.http.HttpClient.newHttpClient();
+        var r = http.send(java.net.http.HttpRequest.newBuilder(
+                        java.net.URI.create("http://localhost:" + ISSUER_PORT + "/issuer/v1/authorizations"))
+                        .header("Content-Type", "application/json")
+                        .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body)).build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+        return r.body().contains("\"approved\":true");
+    }
 
     private static BigDecimal remaining(String token) { return limits.getOrDefault(token, BigDecimal.ZERO); }
 
