@@ -98,6 +98,18 @@ public final class Orders {
     public static Result submit(UUID orderId, String tenant, long customerId,
                                 String variantId, String location, long qty, Instant businessAt)
             throws SQLException {
+        return submit(orderId, tenant, customerId, variantId, location, qty, businessAt, true);
+    }
+
+    /**
+     * @param chargeWallet true to settle the money against minimart's own
+     *   simulated wallet ledger; false to reserve stock ONLY, because a payment
+     *   processor is going to charge the customer instead (see Checkout).
+     */
+    public static Result submit(UUID orderId, String tenant, long customerId,
+                                String variantId, String location, long qty, Instant businessAt,
+                                boolean chargeWallet)
+            throws SQLException {
         try (Connection c = Db.open()) {
             c.setAutoCommit(false);
             try {
@@ -109,18 +121,23 @@ public final class Orders {
                 BigDecimal price = priceOf(c, variantId);
                 BigDecimal amount = price.multiply(BigDecimal.valueOf(qty));
 
-                Ledger.post(c, orderId, businessAt, List.of(
-                        new Ledger.Leg(wallet(customerId), amount.negate()),
-                        new Ledger.Leg(holds(tenant), amount),
-                        new Ledger.Leg(onHand(location, variantId), BigDecimal.valueOf(-qty)),
-                        new Ledger.Leg(reserved(location, variantId), BigDecimal.valueOf(qty))));
+                List<Ledger.Leg> legs = new java.util.ArrayList<>();
+                if (chargeWallet) {
+                    legs.add(new Ledger.Leg(wallet(customerId), amount.negate()));
+                    legs.add(new Ledger.Leg(holds(tenant), amount));
+                }
+                legs.add(new Ledger.Leg(onHand(location, variantId), BigDecimal.valueOf(-qty)));
+                legs.add(new Ledger.Leg(reserved(location, variantId), BigDecimal.valueOf(qty)));
+                Ledger.post(c, orderId, businessAt, legs);
 
                 try (PreparedStatement ps = c.prepareStatement("""
-                        INSERT INTO orders(id, tenant, customer_id, variant_id, location, qty, amount, state, business_at)
-                        VALUES (?,?,?,?,?,?,?, 'reserved', ?)""")) {
+                        INSERT INTO orders(id, tenant, customer_id, variant_id, location, qty, amount, state,
+                                           business_at, payment_mode)
+                        VALUES (?,?,?,?,?,?,?, 'reserved', ?, ?)""")) {
                     ps.setObject(1, orderId); ps.setString(2, tenant); ps.setLong(3, customerId);
                     ps.setString(4, variantId); ps.setString(5, location); ps.setLong(6, qty);
                     ps.setBigDecimal(7, amount); ps.setTimestamp(8, java.sql.Timestamp.from(businessAt));
+                    ps.setString(9, chargeWallet ? "wallet" : "psp");
                     ps.executeUpdate();
                 }
                 try (PreparedStatement ps = c.prepareStatement("""
@@ -163,9 +180,10 @@ public final class Orders {
             try {
                 // lock the reservation row: it, not the pooled account, is the
                 // referee between capturing and releasing the same units
-                String variantId, location, tenant; long qty, customerId; BigDecimal amount; String state;
+                String variantId, location, tenant, mode; long qty, customerId; BigDecimal amount; String state;
                 try (PreparedStatement ps = c.prepareStatement("""
-                        SELECT o.tenant, o.customer_id, o.variant_id, o.location, o.qty, o.amount, r.state
+                        SELECT o.tenant, o.customer_id, o.variant_id, o.location, o.qty, o.amount, r.state,
+                               o.payment_mode
                         FROM orders o JOIN reservations r ON r.order_id = o.id
                         WHERE o.id = ? FOR UPDATE OF r""")) {
                     ps.setObject(1, orderId);
@@ -173,22 +191,29 @@ public final class Orders {
                         if (!rs.next()) throw new IllegalArgumentException("no such order: " + orderId);
                         tenant = rs.getString(1); customerId = rs.getLong(2); variantId = rs.getString(3);
                         location = rs.getString(4); qty = rs.getLong(5); amount = rs.getBigDecimal(6);
-                        state = rs.getString(7);
+                        state = rs.getString(7); mode = rs.getString(8);
                     }
                 }
                 if (!"held".equals(state)) { c.rollback(); return; }   // already settled, do nothing
 
+                // If a processor holds the money, minimart's books carry no money
+                // leg at all: only the goods moved here. Checkout captures or
+                // cancels the PaymentIntent on the other side of the network.
+                // This is read from payment_mode, fixed at creation, precisely so
+                // that compensating a FAILED authorisation still knows the truth.
+                boolean localMoney = "wallet".equals(mode);
+
                 UUID tx = derive((capture ? "fulfil:" : "abort:") + orderId);
                 if (Ledger.claimTx(c, tx, capture ? "order.fulfilled" : "order.aborted", businessAt)) {
-                    Ledger.post(c, tx, businessAt, capture
-                            ? List.of(new Ledger.Leg(holds(tenant), amount.negate()),
-                                      new Ledger.Leg(revenue(tenant), amount),
-                                      new Ledger.Leg(reserved(location, variantId), BigDecimal.valueOf(-qty)),
-                                      new Ledger.Leg(sold(location, variantId), BigDecimal.valueOf(qty)))
-                            : List.of(new Ledger.Leg(holds(tenant), amount.negate()),
-                                      new Ledger.Leg(wallet(customerId), amount),
-                                      new Ledger.Leg(reserved(location, variantId), BigDecimal.valueOf(-qty)),
-                                      new Ledger.Leg(onHand(location, variantId), BigDecimal.valueOf(qty))));
+                    List<Ledger.Leg> legs = new java.util.ArrayList<>();
+                    if (localMoney) {
+                        legs.add(new Ledger.Leg(holds(tenant), amount.negate()));
+                        legs.add(new Ledger.Leg(capture ? revenue(tenant) : wallet(customerId), amount));
+                    }
+                    legs.add(new Ledger.Leg(reserved(location, variantId), BigDecimal.valueOf(-qty)));
+                    legs.add(new Ledger.Leg(capture ? sold(location, variantId) : onHand(location, variantId),
+                            BigDecimal.valueOf(qty)));
+                    Ledger.post(c, tx, businessAt, legs);
                 }
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE reservations SET state = ? WHERE order_id = ? AND state = 'held'")) {

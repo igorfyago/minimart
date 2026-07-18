@@ -81,8 +81,22 @@ reservation row is the referee, taken `FOR UPDATE` with a state check by both pa
 - *audit 3* (pooled reserved balance == units held by live reservations) catches a phantom release that sum-zero and
   cache-drift both sleep through. That is the whole reason it exists.
 
+**The seam · minimart talks to minipay (done, 3/3 lessons green).** The store stopped being its own payment
+processor. Checkout is now a small saga across a network: reserve the goods locally in one ACID commit, then
+authorise the money at the processor over HTTP with an idempotency key derived from the order, and if that second
+step fails **for any reason at all**, give the goods back.
+
+- *happy path* → goods held in minimart, money held in minipay, two databases, neither one holding both.
+- *processor unreachable* → every unit returns to the shelf. A store that reserves stock and then loses the network
+  must compensate, or it starves its own warehouse with phantom holds.
+- *checkout retried* → one reservation and one authorisation.
+
+A bug worth recording, because the design pass predicted this class of thing: the first version decided "did a
+processor take the money?" by checking whether `payment_intent_id` was set. But that column is only filled once
+authorisation *succeeds*, so the compensation path saw NULL and tried to refund a wallet that was never charged.
+How an order is paid is a fact fixed when the order is created, not one inferred afterwards from a success artifact.
+
 ### Next
-- **Slice 3.** Catalog, cart, multi-line, HTTP surface.
 - **Slice 4.** Order saga over Kafka via the transactional outbox.
 - **Slices 5-6.** MRR movement ledger, then billing (a renewal is just an order with a derived id).
 - **Slices 7-8.** The synthetic customer population, then experiments with A/A calibration.
