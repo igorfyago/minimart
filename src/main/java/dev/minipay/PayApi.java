@@ -292,10 +292,15 @@ public final class PayApi {
             Settlements.Batch b = Settlements.run(orElse(Json.str(body, "merchant"), "helix"),
                     orElse(Json.str(body, "currency"), "EUR"), day, businessAt(body));
             if (b == null) { send(ex, 200, "{\"settled\":false,\"reason\":\"nothing to settle\"}"); return; }
+            // MONEY LEAVES THIS API AT TWO DECIMAL PLACES, ALWAYS. The ledger
+            // stores more precision than a currency has, which is right for
+            // arithmetic and wrong for an answer: "150.00000000" in a payout
+            // tells a merchant their integration is talking to something that
+            // does not know what a euro is.
             send(ex, 200, "{\"settlement\":\"" + b.id() + "\",\"items\":" + b.items()
-                    + ",\"gross\":\"" + b.gross().toPlainString()
-                    + "\",\"fee\":\"" + b.fee().toPlainString()
-                    + "\",\"net\":\"" + b.net().toPlainString() + "\"}");
+                    + ",\"gross\":\"" + money(b.gross())
+                    + "\",\"fee\":\"" + money(b.fee())
+                    + "\",\"net\":\"" + money(b.net()) + "\"}");
         } catch (Exception e) { send(ex, 500, err(String.valueOf(e.getMessage()))); }
     }
 
@@ -343,6 +348,12 @@ public final class PayApi {
                     + "\",\"brand_label\":\"" + Json.esc(String.valueOf(m.brandLabel()))
                     + "\",\"last4\":\"" + Json.esc(String.valueOf(m.last4())) + "\"}");
         } catch (Exception e) { send(ex, 500, err(String.valueOf(e.getMessage()))); }
+    }
+
+    /** A currency has two decimal places. The ledger keeps more because
+     *  arithmetic needs it; an answer must not. */
+    private static String money(BigDecimal v) {
+        return v.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString();
     }
 
     private static String orElse(String v, String fallback) { return v == null || v.isBlank() ? fallback : v; }
