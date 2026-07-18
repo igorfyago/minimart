@@ -91,18 +91,17 @@ class PoisonMessageLessonTest {
         assertInstanceOf(Orders.Ok.class, Orders.submit(order, TENANT, 1L, GOOD, LOC, 5, T0, false));
         String key = "order.placed:" + order;
 
-        // the inner gate: an exact repeat is already harmless
+        // The inner gate on its own: the handler called directly, twice, with
+        // the SAME event key. It absorbs the repeat even at a different
+        // business time now, because the transaction id is derived from the
+        // event rather than from the clock. The first version derived from the
+        // clock, so this second call ordered a second pallet, and the gate was
+        // open exactly when a redelivery needed it closed.
         long before = onHand(GOOD);
-        Replenishment.onOrderPlaced(key, payloadFor(key, GOOD), T0);
-        Replenishment.onOrderPlaced(key, payloadFor(key, GOOD), T0);
+        directly(key, payloadFor(key, GOOD), T0);
+        directly(key, payloadFor(key, GOOD), T0.plus(Duration.ofHours(1)));
         assertEquals(before + 2, onHand(GOOD),
-                "the derived transaction id absorbs an identical repeat on its own");
-
-        // but a redelivery an hour later derives a DIFFERENT id, and the inner
-        // gate does nothing about it
-        Replenishment.onOrderPlaced(key, payloadFor(key, GOOD), T0.plus(Duration.ofHours(1)));
-        assertEquals(before + 4, onHand(GOOD),
-                "a redelivery at a different business time orders AGAIN: the inner gate is not enough");
+                "the event-derived transaction id absorbs a repeat at ANY business time");
 
         // the outer gate closes that hole. Five deliveries, spread over time.
         reset();
@@ -269,7 +268,7 @@ class PoisonMessageLessonTest {
         EventRuntime a = new EventRuntime(Orders.TOPIC_ORDERS, "consumer-a", Replenishment::onOrderPlaced);
         AtomicInteger seenByB = new AtomicInteger();
         EventRuntime b = new EventRuntime(Orders.TOPIC_ORDERS, "consumer-b",
-                (k, p, at) -> seenByB.incrementAndGet());
+                (c, k, p, at) -> seenByB.incrementAndGet());
 
         assertEquals(EventRuntime.Result.RETRY, a.apply(key, payload, T0), "A cannot handle it");
         assertEquals(EventRuntime.Result.HANDLED, b.apply(key, payload, T0), "B can, and still gets the chance");
@@ -337,10 +336,76 @@ class PoisonMessageLessonTest {
                 + "an unrecognisable one was still buried");
     }
 
+    /**
+     * LESSON 7 · THE CLAIM AND THE EFFECT COMMIT TOGETHER, OR NEITHER DOES.
+     *
+     * Lesson 1 shows the runtime absorbing a redelivery. This one shows WHY
+     * the ordering inside it is the whole guarantee, and it was written after
+     * a review found the ordering wrong.
+     *
+     * The first version checked handled_events on one connection, ran the
+     * handler, then recorded the claim on a third. Two windows follow from
+     * that. A crash between the effect and the claim leaves the event
+     * unclaimed, so the next delivery applies it AGAIN. And two consumers in
+     * one group can both pass the check before either records anything.
+     *
+     * The obvious repair, recording the claim BEFORE the handler, is worse: a
+     * crash then leaves an event marked handled that never took effect, which
+     * is silent loss, and this codebase treats silent loss as the one
+     * unacceptable failure. The only ordering that is neither is claim and
+     * effect in ONE transaction.
+     */
+    @Test
+    void lesson7_a_crash_between_the_effect_and_the_claim_cannot_double_apply() throws Exception {
+        Replenishment.threshold = 1000;
+        Replenishment.reorderQty = 2;
+        UUID order = UUID.randomUUID();
+        Orders.submit(order, TENANT, 9L, GOOD, LOC, 5, T0, false);
+        String key = "order.placed:" + order;
+        String payload = payloadFor(key, GOOD);
+
+        // A handler that does the real work and then dies, exactly as a crash
+        // between the effect and the claim would.
+        AtomicInteger applied = new AtomicInteger();
+        EventRuntime crashing = new EventRuntime(Orders.TOPIC_ORDERS, Replenishment.CONSUMER,
+                (c, k, p, at) -> {
+                    Replenishment.onOrderPlaced(c, k, p, at);
+                    applied.incrementAndGet();
+                    // A crash here is now indistinguishable from a rollback,
+                    // which is the entire point: the effect and the claim have
+                    // one fate. Before the fix they had two, and the work
+                    // survived while the claim did not.
+                    throw new IllegalStateException("the process died right here");
+                });
+
+        long before = onHand(GOOD);
+        crashing.apply(key, payload, T0);
+        assertEquals(1, applied.get(), "the handler ran and did its work");
+
+        assertEquals(before, onHand(GOOD),
+                "NOTHING happened: the work rolled back with the claim, so there is nothing to double-apply");
+
+        // and the redelivery applies it exactly once, cleanly
+        EventRuntime healthy = runtime(Replenishment.CONSUMER);
+        healthy.apply(key, payload, T0.plus(Duration.ofHours(2)));
+        assertEquals(before + 2, onHand(GOOD), "one top-up, from the delivery that actually completed");
+        System.out.println("lesson 7: a handler that committed and then died did not get applied twice");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static EventRuntime runtime(String group) {
         return new EventRuntime(Orders.TOPIC_ORDERS, group, Replenishment::onOrderPlaced);
+    }
+
+    /** Call the handler with a transaction of its own, which is the only way to
+     *  call it at all now: it cannot be invoked without joining somebody's. */
+    private static void directly(String eventKey, String payload, Instant at) throws Exception {
+        try (Connection c = Db.open()) {
+            c.setAutoCommit(false);
+            Replenishment.onOrderPlaced(c, eventKey, payload, at);
+            c.commit();
+        }
     }
 
     private static String payloadFor(String eventKey, String variant) {

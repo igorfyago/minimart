@@ -67,17 +67,38 @@ public final class Orders {
             throws SQLException {
         try (Connection c = Db.open()) {
             c.setAutoCommit(false);
-            Ledger.ensureAccount(c, supplier(tenant, variantId), "external", unit(variantId));
-            Ledger.ensureAccount(c, onHand(location, variantId), "stock", unit(variantId));
-            Ledger.ensureAccount(c, reserved(location, variantId), "stock", unit(variantId));
-            Ledger.ensureAccount(c, sold(location, variantId), "stock", unit(variantId));
-            UUID tx = derive("receive:" + location + ':' + variantId + ':' + qty + ':' + businessAt);
-            if (Ledger.claimTx(c, tx, "stock.received", businessAt)) {
-                Ledger.post(c, tx, businessAt, List.of(
-                        new Ledger.Leg(supplier(tenant, variantId), BigDecimal.valueOf(-qty)),
-                        new Ledger.Leg(onHand(location, variantId), BigDecimal.valueOf(qty))));
-            }
+            receiveStock(c, tenant, location, variantId, qty, businessAt, null);
             c.commit();
+        }
+    }
+
+    /**
+     * Receive goods inside the CALLER'S transaction.
+     *
+     * An event consumer needs this: its claim on the event and the effect of
+     * the event have to commit together, and they cannot if this opens a
+     * connection of its own.
+     *
+     * idemToken is what the transaction id is derived from, and it matters
+     * more than it looks. Deriving from the business time means two deliveries
+     * of ONE event, arriving at different moments, produce different
+     * transaction ids and both post. The token lets the caller derive from the
+     * EVENT instead, which is the thing that is actually supposed to happen
+     * once. Null keeps the old behaviour for callers with no event behind them,
+     * such as a human receiving a delivery.
+     */
+    public static void receiveStock(Connection c, String tenant, String location, String variantId,
+                                    long qty, Instant businessAt, String idemToken) throws SQLException {
+        Ledger.ensureAccount(c, supplier(tenant, variantId), "external", unit(variantId));
+        Ledger.ensureAccount(c, onHand(location, variantId), "stock", unit(variantId));
+        Ledger.ensureAccount(c, reserved(location, variantId), "stock", unit(variantId));
+        Ledger.ensureAccount(c, sold(location, variantId), "stock", unit(variantId));
+        UUID tx = derive("receive:" + (idemToken != null ? idemToken
+                : location + ':' + variantId + ':' + qty + ':' + businessAt));
+        if (Ledger.claimTx(c, tx, "stock.received", businessAt)) {
+            Ledger.post(c, tx, businessAt, List.of(
+                    new Ledger.Leg(supplier(tenant, variantId), BigDecimal.valueOf(-qty)),
+                    new Ledger.Leg(onHand(location, variantId), BigDecimal.valueOf(qty))));
         }
     }
 

@@ -45,10 +45,19 @@ import java.util.List;
  */
 public final class EventRuntime {
 
-    /** Handle one event. Throwing means "not handled", and this runtime decides
-     *  whether that becomes a retry or a burial. */
+    /**
+     * Handle one event, INSIDE the runtime's transaction.
+     *
+     * The connection is passed rather than opened by the handler because the
+     * claim on the event and the effect of the event must commit together. A
+     * handler that opens its own connection has two fates instead of one, and
+     * the window between them is exactly where a redelivery double-applies.
+     *
+     * Throwing means "not handled", and this runtime decides whether that
+     * becomes a retry or a burial.
+     */
     public interface Handler {
-        void handle(String eventKey, String payload, Instant businessAt) throws Exception;
+        void handle(Connection c, String eventKey, String payload, Instant businessAt) throws Exception;
     }
 
     public enum Result { HANDLED, DUPLICATE, RETRY, BURIED }
@@ -73,17 +82,42 @@ public final class EventRuntime {
 
     public String group() { return group; }
 
-    /** Apply one event, exactly once, deciding what a failure means. */
+    /**
+     * Apply one event, exactly once, deciding what a failure means.
+     *
+     * THE CLAIM AND THE EFFECT SHARE ONE TRANSACTION, and the ordering inside
+     * it is the entire guarantee. The first version checked handled_events on
+     * one connection, ran the handler, then recorded the claim on a third,
+     * which left two windows: a crash between the effect and the claim meant
+     * the next delivery applied it AGAIN, and two consumers in one group could
+     * both pass the check before either recorded anything. Both were found by
+     * review rather than by a test, which is why lesson 7 now exists.
+     *
+     * Simply moving the claim ABOVE the handler on its own connection would be
+     * worse, not better: a crash would then leave an event marked handled that
+     * never took effect, and silent loss is the one failure this codebase
+     * treats as unacceptable. One transaction is the only ordering that is
+     * neither.
+     */
     public Result apply(String eventKey, String payload, Instant businessAt) throws SQLException {
-        if (alreadyHandled(eventKey)) return Result.DUPLICATE;
-        try {
-            handler.handle(eventKey, payload, businessAt);
-            Outbox.recordHandled(eventKey, group, businessAt);
-            clearRetry(eventKey);
-            return Result.HANDLED;
-        } catch (Exception e) {
-            return recordFailure(eventKey, payload, businessAt, e) ? Result.BURIED : Result.RETRY;
+        try (Connection c = Db.open()) {
+            c.setAutoCommit(false);
+            try {
+                // the claim IS the gate: false means somebody else has it, and
+                // that answer is taken under the same transaction as the work
+                if (!Outbox.recordHandled(c, eventKey, group, businessAt)) {
+                    c.rollback();
+                    return Result.DUPLICATE;
+                }
+                handler.handle(c, eventKey, payload, businessAt);
+                c.commit();
+            } catch (Exception e) {
+                c.rollback();   // the claim goes back with the effect it guarded
+                return recordFailure(eventKey, payload, businessAt, e) ? Result.BURIED : Result.RETRY;
+            }
         }
+        clearRetry(eventKey);
+        return Result.HANDLED;
     }
 
     /**
@@ -128,22 +162,23 @@ public final class EventRuntime {
                 payload = rs.getString(1);
             }
         }
-        try {
+        try (Connection c = Db.open()) {
+            c.setAutoCommit(false);
             // The handler runs unconditionally, and deliberately so. Burial
             // CLAIMED this event in handled_events, to stop the runtime
             // offering it again, so checking that claim here would mean a
             // buried event could never be replayed: the very thing this method
             // exists to do. What prevents a double replay is the
             // replayed_at IS NULL above, which is the right guard because it
-            // asks the question actually being asked.
-            handler.handle(eventKey, payload, businessAt);
-            Outbox.recordHandled(eventKey, group, businessAt);
-            try (Connection c = Db.open();
-                 PreparedStatement ps = c.prepareStatement(
-                         "UPDATE dead_letters SET replayed_at = now() WHERE event_key = ? AND consumer = ?")) {
+            // asks the question actually being asked, and it is marked in the
+            // same transaction as the work.
+            handler.handle(c, eventKey, payload, businessAt);
+            try (PreparedStatement ps = c.prepareStatement(
+                    "UPDATE dead_letters SET replayed_at = now() WHERE event_key = ? AND consumer = ? AND replayed_at IS NULL")) {
                 ps.setString(1, eventKey); ps.setString(2, group);
-                ps.executeUpdate();
+                if (ps.executeUpdate() != 1) { c.rollback(); return false; }
             }
+            c.commit();
             return true;
         } catch (Exception e) {
             // still broken. It stays buried, and the error is refreshed so

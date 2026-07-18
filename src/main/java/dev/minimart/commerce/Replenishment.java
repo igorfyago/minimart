@@ -51,7 +51,8 @@ public final class Replenishment {
      * and a condition that might clear later, and both are expressed by throwing
      * or not throwing rather than by a status code nobody checks.
      */
-    public static void onOrderPlaced(String eventKey, String payload, Instant businessAt) throws Exception {
+    public static void onOrderPlaced(Connection c, String eventKey, String payload, Instant businessAt)
+            throws Exception {
         if (!"order.placed".equals(Json.str(payload, "type"))) return;   // not ours, and not an error
 
         String tenant = Json.str(payload, "tenant");
@@ -91,21 +92,21 @@ public final class Replenishment {
             throw new IllegalStateException("supplier refuses to ship " + variant);
         }
 
-        try (Connection c = Db.open()) {
-            BigDecimal onHand;
-            try {
-                onHand = Ledger.balance(c, Orders.onHand(location, variant));
-            } catch (IllegalArgumentException noAccount) {
-                // nothing was ever stocked here, so there is nothing to top up
-                // and this is not a failure
-                return;
-            }
-            if (onHand.longValue() >= threshold) return;
+        BigDecimal onHand;
+        try {
+            onHand = Ledger.balance(c, Orders.onHand(location, variant));
+        } catch (IllegalArgumentException noAccount) {
+            // nothing was ever stocked here, so there is nothing to top up
+            // and this is not a failure
+            return;
         }
+        if (onHand.longValue() >= threshold) return;
 
-        // receiveStock derives its transaction id, so a redelivery that somehow
-        // got past the handled_events claim STILL cannot order twice. Two
-        // independent gates, because this one costs real money.
-        Orders.receiveStock(tenant, location, variant, reorderQty, businessAt);
+        // The transaction id is derived from the EVENT, not from the business
+        // time. Deriving from the clock meant two deliveries of one event,
+        // arriving at different moments, produced different ids and both
+        // posted, so the inner gate was open exactly when it was needed. Two
+        // independent gates, because this one costs a pallet.
+        Orders.receiveStock(c, tenant, location, variant, reorderQty, businessAt, eventKey);
     }
 }

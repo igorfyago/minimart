@@ -177,18 +177,20 @@ public final class MartApi {
             String location = Json.str(body, "location");
             String interval = Json.str(body, "interval_days");
             Instant at = businessAt(body);
-            long before = subscriptionCount();
             UUID id = Billing.subscribe(tenant, customer, variant, location,
                     interval == null ? 30 : Integer.parseInt(interval), at);
+            Billing.Subscription outcome = Billing.lastSubscribeResult();
             // SUBSCRIBE IS IDEMPOTENT, so it may have created nothing and handed
-            // back a subscription the customer already had, possibly one that is
-            // in dunning. The first version answered "active" as a hardcoded
-            // string without ever looking, so a past_due customer was told they
-            // were fine by an endpoint that had not checked. A caller cannot
-            // recover from that, because from outside there is no other way to
-            // find out.
-            boolean created = subscriptionCount() > before;
-            send(ex, 200, "{\"subscription\":\"" + id + "\",\"status\":\"" + statusOf(id)
+            // back a subscription the customer already had, possibly one in
+            // dunning. The first version answered "active" as a hardcoded string
+            // without ever looking. The second asked the database how many
+            // subscriptions existed before and after, which was a race: another
+            // customer subscribing in between made an idempotent no-op report
+            // created, on an endpoint a whole agent population hits at once.
+            // Now the statement that inserted, or did not, is the one that says.
+            boolean created = outcome != null && outcome.created();
+            String status = outcome != null ? outcome.status() : statusOf(id);
+            send(ex, 200, "{\"subscription\":\"" + id + "\",\"status\":\"" + status
                     + "\",\"created\":" + created + "}");
         } catch (BadBusinessTime e) { send(ex, 400, err(e)); }
         catch (Exception e) { send(ex, 500, err(e)); }
@@ -459,15 +461,6 @@ public final class MartApi {
         if (at == null || at.isBlank()) return Instant.now();
         try { return Instant.parse(at); }
         catch (Exception e) { throw new BadBusinessTime(at); }
-    }
-
-    private static long subscriptionCount() throws SQLException {
-        try (Connection c = Db.open();
-             PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM subscriptions");
-             ResultSet rs = ps.executeQuery()) {
-            rs.next();
-            return rs.getLong(1);
-        }
     }
 
     private static String statusOf(UUID subscriptionId) throws SQLException {

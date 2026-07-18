@@ -26,7 +26,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * next borrower. An empty pool makes the caller wait: bounded queueing is
  * backpressure, not collapse.
  */
-public final class Pool {
+/* Not final: open() is overridable so a test can make the database fail on
+ * demand. The recovery path is the one that matters and it cannot be
+ * exercised against a database that is working. */
+public class Pool {
 
     private final String url, user, password;
     private final ArrayBlockingQueue<Connection> idle;
@@ -43,7 +46,7 @@ public final class Pool {
         if (real == null && created.get() < size) {
             synchronized (this) {
                 if (created.get() < size) {
-                    real = DriverManager.getConnection(url, user, password);
+                    real = open();
                     created.incrementAndGet();
                 }
             }
@@ -57,9 +60,44 @@ public final class Pool {
             }
             if (real == null) throw new SQLException("no connection available within " + timeout + " " + unit);
         }
-        if (!real.isValid(1)) {                        // a dead one gets replaced, not handed out
+        // A DEAD ONE GETS REPLACED, NOT HANDED OUT.
+        //
+        // The accounting here is the whole point, and the first version got it
+        // wrong in a way that only bites during recovery. A connection taken
+        // from idle has already been counted in `created`. If validating or
+        // replacing it throws, it is gone, and unless `created` comes down with
+        // it, the pool permanently loses a slot.
+        //
+        // Postgres restarting kills every pooled socket at once, so all `size`
+        // slots fail their replacement while the database is still coming up.
+        // After that `created == size` with `idle` empty forever: the guard
+        // above can never open another connection, every caller blocks for the
+        // timeout and fails, and the database is perfectly healthy throughout.
+        // Nothing recovers it but a restart, which is the worst shape an outage
+        // can have, because everything anybody would think to look at says fine.
+        //
+        // The two failures are handled separately rather than under one catch,
+        // because they differ in who still owns the slot. The second version of
+        // this fix used a single catch and decremented twice on the path where
+        // both happen, driving the count negative.
+        boolean valid;
+        try {
+            valid = real.isValid(1);
+        } catch (SQLException e) {
+            // the connection is still counted, so it is ours to give back
             try { real.close(); } catch (SQLException ignored) {}
-            real = DriverManager.getConnection(url, user, password);
+            created.decrementAndGet();
+            throw e;
+        }
+        if (!valid) {
+            try { real.close(); } catch (SQLException ignored) {}
+            // The slot goes back BEFORE the replacement is attempted, so if
+            // open() throws, the count is already correct and the exception
+            // needs no cleanup of its own.
+            created.decrementAndGet();
+            Connection fresh = open();
+            created.incrementAndGet();
+            real = fresh;
         }
         return proxy(real);
     }
@@ -99,6 +137,18 @@ public final class Pool {
             created.decrementAndGet();
         }
     }
+
+    /** Open one physical connection. Overridable so a test can make the
+     *  database fail on demand: the recovery path is the one that matters and
+     *  it cannot be exercised against a database that is working. */
+    protected Connection open() throws SQLException {
+        return DriverManager.getConnection(url, user, password);
+    }
+
+    /** How many physical connections this pool believes it owns. If this ever
+     *  sticks at size with nothing idle, the pool is dead and this is the
+     *  number that says so. */
+    public int created() { return created.get(); }
 
     public int size() { return size; }
     public int idleCount() { return idle.size(); }

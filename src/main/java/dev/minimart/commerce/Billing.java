@@ -51,9 +51,29 @@ public final class Billing {
      *  customers for it. */
     public record Report(int renewed, int failed, int recovered, int givenUp, int skipped) {}
 
+    /**
+     * What subscribe did, said by the code that actually did it.
+     *
+     * The API used to answer "was anything created" by taking COUNT(*) of the
+     * whole table before and after. That is wrong twice over: it is a race,
+     * because another customer subscribing in between makes an idempotent no-op
+     * report created, and it is two unpredicated scans of a growing table on
+     * every call. Only the INSERT knows the answer, so the INSERT reports it.
+     */
+    public record Subscription(UUID id, String status, boolean created) {}
+
     private Billing() {}
 
     private static UUID derive(String s) { return UUID.nameUUIDFromBytes(s.getBytes(StandardCharsets.UTF_8)); }
+
+    /** What the most recent subscribe on THIS thread did. A thread local rather
+     *  than a changed return type, so the many existing callers that only want
+     *  the id are untouched, and the one caller that has to tell a creation from
+     *  a no-op can ask. Set inside the transaction that decided it. */
+    private static final ThreadLocal<Subscription> lastResult = new ThreadLocal<>();
+
+    /** The outcome of the last subscribe on this thread, or null. */
+    public static Subscription lastSubscribeResult() { return lastResult.get(); }
 
     /** Start a subscription and bill period 0 immediately.
      *
@@ -69,12 +89,20 @@ public final class Billing {
             try {
                 // a live subscription for this product is returned as-is: idempotent
                 try (PreparedStatement ps = c.prepareStatement("""
-                        SELECT id FROM subscriptions
+                        SELECT id, status FROM subscriptions
                         WHERE tenant = ? AND customer_id = ? AND variant_id = ?
                           AND status IN ('active','past_due','paused')""")) {
                     ps.setString(1, tenant); ps.setLong(2, customerId); ps.setString(3, variantId);
                     try (ResultSet rs = ps.executeQuery()) {
-                        if (rs.next()) { UUID live = (UUID) rs.getObject(1); c.rollback(); return live; }
+                        if (rs.next()) {
+                            UUID live = (UUID) rs.getObject(1);
+                            String status = rs.getString(2);
+                            c.rollback();
+                            // nothing was created, and the status is the one
+                            // actually held, which may well be past_due
+                            lastResult.set(new Subscription(live, status, false));
+                            return live;
+                        }
                     }
                 }
                 // dead ones become earlier generations, so the new id is genuinely new
@@ -85,6 +113,7 @@ public final class Billing {
                     try (ResultSet rs = ps.executeQuery()) { rs.next(); generation = rs.getInt(1); }
                 }
                 UUID id = derive("sub:" + tenant + ':' + customerId + ':' + variantId + ':' + generation);
+                int inserted;
                 try (PreparedStatement ps = c.prepareStatement("""
                         INSERT INTO subscriptions(id, tenant, customer_id, variant_id, location, status,
                                                   interval_days, period_index, next_renewal_at, business_at)
@@ -93,7 +122,9 @@ public final class Billing {
                     ps.setString(4, variantId); ps.setString(5, location); ps.setInt(6, intervalDays);
                     ps.setTimestamp(7, java.sql.Timestamp.from(businessAt));
                     ps.setTimestamp(8, java.sql.Timestamp.from(businessAt));
-                    ps.executeUpdate();
+                    // the row count IS the answer to "did this create anything",
+                    // taken by the statement that would know
+                    inserted = ps.executeUpdate();
                 }
                 // SAME TRANSACTION as the subscription row. A started event for a
                 // subscription that rolled back would be a lie nobody could retract.
@@ -101,6 +132,7 @@ public final class Billing {
                         tenant, customerId, variantId, priceOf(c, variantId), intervalDays,
                         generation, businessAt);
                 c.commit();
+                lastResult.set(new Subscription(id, "active", inserted == 1));
                 return id;
             } catch (SQLException | RuntimeException e) { c.rollback(); throw e; }
         }
