@@ -36,23 +36,31 @@ public final class ReservationSweeper {
 
     /** Expire everything held past its deadline. Returns how many were released. */
     public static int sweepOnce(Instant now, int limit) throws SQLException {
-        List<UUID> due = new ArrayList<>();
+        record Due(UUID orderId, String paymentMode) {}
+        List<Due> due = new ArrayList<>();
         try (Connection c = Db.open();
-             PreparedStatement ps = c.prepareStatement(
-                     "SELECT order_id FROM reservations WHERE state = 'held' AND expires_at < ? " +
-                     "ORDER BY expires_at LIMIT ?")) {
+             PreparedStatement ps = c.prepareStatement("""
+                     SELECT r.order_id, o.payment_mode
+                     FROM reservations r JOIN orders o ON o.id = r.order_id
+                     WHERE r.state = 'held' AND r.expires_at < ?
+                     ORDER BY r.expires_at LIMIT ?""")) {
             ps.setTimestamp(1, java.sql.Timestamp.from(now));
             ps.setInt(2, limit);
             try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) due.add((UUID) rs.getObject(1));
+                while (rs.next()) due.add(new Due((UUID) rs.getObject(1), rs.getString(2)));
             }
         }
         // No lock is held across this loop on purpose. abort() re-reads the
         // reservation under its own lock and refuses anything not still 'held',
         // so a capture that slipped in between simply wins the race.
         int released = 0;
-        for (UUID orderId : due) {
-            Orders.abort(orderId, now);
+        for (Due d : due) {
+            // An abandoned cart must release BOTH sides. Returning the goods but
+            // leaving the authorisation standing would hold a customer's money
+            // for a product that went back on the shelf, which is the kind of
+            // thing that gets a real processor fined.
+            if ("psp".equals(d.paymentMode())) Checkout.cancel(d.orderId(), now);
+            else Orders.abort(d.orderId(), now);
             released++;
         }
         return released;

@@ -22,10 +22,15 @@ public final class PayDb {
     public static final String USER = env("MINIPAY_DB_USER", "minimart");
     public static final String PASSWORD = env("MINIPAY_DB_PASSWORD", "minimart");
 
+    // the processor pools its connections too · same lesson, same reason
+    private static final dev.minimart.core.Pool POOL =
+            new dev.minimart.core.Pool(URL, USER, PASSWORD,
+                    Integer.parseInt(env("MINIPAY_POOL", "16")));
+
     private PayDb() {}
 
     public static Connection open() throws SQLException {
-        return DriverManager.getConnection(URL, USER, PASSWORD);
+        return POOL.borrow(10, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     /** Create the database if it is missing, then migrate it. */

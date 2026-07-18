@@ -144,6 +144,39 @@ class CheckoutLessonTest {
         System.out.println("lesson 3: checkout retried · one reservation, one authorisation");
     }
 
+    /** LESSON 4 · an abandoned cart must release BOTH sides of the seam.
+     *  Returning the goods while leaving the authorisation standing would hold a
+     *  customer's money for a product that went back on the shelf. */
+    @Test
+    void lesson4_expiry_releases_the_goods_and_the_money() throws Exception {
+        Orders.receiveStock(TENANT, LOC, VARIANT, 10, T0);
+        UUID orderId = UUID.randomUUID();
+        assertInstanceOf(Checkout.Placed.class,
+                Checkout.place(orderId, TENANT, 45L, VARIANT, LOC, 2, T0));
+
+        try (Connection c = PayDb.open()) {
+            assertEquals(new BigDecimal("80.00"),
+                    Ledger.balance(c, PaymentIntents.holds(TENANT)).stripTrailingZeros().setScale(2),
+                    "money is held while the cart lives");
+        }
+
+        // the customer wandered off; the sweeper reclaims it after the TTL
+        int released = ReservationSweeper.sweepOnce(T0.plus(java.time.Duration.ofHours(2)), 100);
+        assertEquals(1, released);
+
+        try (Connection c = Db.open()) {
+            assertEquals(10, Ledger.balance(c, Orders.onHand(LOC, VARIANT)).intValueExact(), "goods returned");
+            assertEquals("aborted", orderState(c, orderId));
+        }
+        try (Connection c = PayDb.open()) {
+            assertEquals(0, Ledger.balance(c, PaymentIntents.holds(TENANT)).signum(),
+                    "and the authorisation was voided, not left standing");
+            assertEquals(0, Ledger.balance(c, PaymentIntents.source("cust_45")).signum(),
+                    "the customer was never really charged");
+        }
+        System.out.println("lesson 4: abandoned cart · goods back on the shelf AND the hold voided at the processor");
+    }
+
     private static String orderState(Connection c, UUID id) throws Exception {
         try (PreparedStatement ps = c.prepareStatement("SELECT state FROM orders WHERE id = ?")) {
             ps.setObject(1, id);

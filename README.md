@@ -108,7 +108,29 @@ exactly one currency, so the first delivery pinned it to `UNIT:v-mots-10mg`, and
 posted a foreign-currency leg into it. Every existing test passed, because each one used a single product. Audit 1
 found it the moment a second product existed. Suppliers are now per variant, with a regression lesson.
 
+**The synthetic customers (done, 4/4 lessons green).** A seeded population of agent customers shops through the
+real HTTP API while a compressed clock runs days past in seconds. Every choice is a pure function of
+`(runId, agentId, tick, step)`, so a run is reproducible even though agents execute concurrently, and order ids
+are *derived* rather than random, which is what makes a replayed window idempotent instead of duplicating orders.
+
+- *same seed, twice* → byte-identical decision digest.
+- *different seed* → genuinely different crowd.
+- *40 agents over 48 ticks* → 507 orders placed, 402 shipped, 92 abandoned carts reclaimed by the sweeper, every
+  audit clean and units conserved for every product.
+- *the whole run replayed* → not one new order, not one new ledger entry.
+
+**Two real bugs this slice found.**
+
+*The pool, arriving exactly as minibank taught it.* The first determinism run failed. The cause was not the seeding:
+with a connection opened per ledger call, a few hundred simulated customers exhausted the machine's ephemeral TCP
+ports and calls began failing with `Address already in use`. Which call failed depended on socket timing, so the
+run stopped being reproducible. A missing pool did not merely make things slow, it destroyed determinism. With a
+hand-written pool the digests match and the run is twice as fast.
+
+*Half a compensation is a bug.* The sweeper returned abandoned goods to the shelf but left the authorisation
+standing at the processor, holding a customer's money for a product they no longer had. An abandoned cart has to
+release both sides of the seam.
+
 ### Next
 - **Slice 4.** Order saga over Kafka via the transactional outbox.
 - **Slices 5-6.** MRR movement ledger, then billing (a renewal is just an order with a derived id).
-- **Slices 7-8.** The synthetic customer population, then experiments with A/A calibration.
