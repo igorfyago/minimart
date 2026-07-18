@@ -281,6 +281,17 @@ public final class PaymentIntents {
                                 new Ledger.Leg(source(customer), amount)));
                     }
                 }
+                // The receivable is marked in the SAME transaction that posts
+                // it, so "this payment owes the merchant money" and "the ledger
+                // says so" can never disagree. A flag set afterwards would be a
+                // second write with its own way of failing.
+                if (capture) {
+                    try (PreparedStatement ps = c.prepareStatement(
+                            "UPDATE payment_intents SET receivable_posted = TRUE WHERE id = ?")) {
+                        ps.setString(1, id);
+                        ps.executeUpdate();
+                    }
+                }
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE payment_intents SET status = ?, settled_at = ? WHERE id = ?")) {
                     ps.setString(1, target);

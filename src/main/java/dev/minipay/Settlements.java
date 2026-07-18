@@ -93,6 +93,12 @@ public final class Settlements {
                         SELECT id, amount FROM payment_intents
                          WHERE merchant_ref = ? AND currency = ? AND status = 'succeeded'
                            AND settlement_id IS NULL
+                           -- ONLY what actually posted a receivable. A payment
+                           -- that completed before the receivable model existed
+                           -- credited the merchant directly and has nothing here
+                           -- to draw down, and gathering it would make the batch
+                           -- larger than the money backing it.
+                           AND receivable_posted
                            AND business_at >= ? AND business_at < ?
                          ORDER BY id
                          FOR UPDATE""")) {
@@ -178,7 +184,8 @@ public final class Settlements {
         try (Connection c = PayDb.open();
              PreparedStatement ps = c.prepareStatement("""
                      SELECT COALESCE(SUM(amount), 0) FROM payment_intents
-                      WHERE merchant_ref = ? AND status = 'succeeded' AND settlement_id IS NULL""")) {
+                      WHERE merchant_ref = ? AND status = 'succeeded' AND settlement_id IS NULL
+                        AND receivable_posted""")) {
             ps.setString(1, merchant);
             try (ResultSet rs = ps.executeQuery()) { rs.next(); return rs.getBigDecimal(1); }
         }
@@ -191,6 +198,26 @@ public final class Settlements {
      * payment records, which is the only kind of check worth running: a number
      * that agrees with itself proves nothing.
      */
+    /**
+     * AUDIT · payments that completed before the receivable model existed.
+     *
+     * Not a failure and not a backlog: they were paid out under the older rules
+     * and are finished. They are counted so that "why is the outstanding total
+     * not the sum of every succeeded payment" has an answer, which is the only
+     * reason a number like this is worth exposing at all. A quantity nobody can
+     * name is the thing that makes a reconciliation impossible to close.
+     */
+    public static long predatingReceivables(String merchant) throws SQLException {
+        try (Connection c = PayDb.open();
+             PreparedStatement ps = c.prepareStatement("""
+                     SELECT COUNT(*) FROM payment_intents
+                      WHERE merchant_ref = ? AND status = 'succeeded'
+                        AND settlement_id IS NULL AND NOT receivable_posted""")) {
+            ps.setString(1, merchant);
+            try (ResultSet rs = ps.executeQuery()) { rs.next(); return rs.getLong(1); }
+        }
+    }
+
     public static BigDecimal receivableDrift(String merchant) throws SQLException {
         try (Connection c = PayDb.open()) {
             BigDecimal fromLedger;

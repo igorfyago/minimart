@@ -218,6 +218,71 @@ class SettlementLessonTest {
         System.out.println("lesson 6: the receivable balance and the unsettled sales agreed at every point");
     }
 
+
+    /**
+     * LESSON 7 · MONEY THAT PREDATES A NEW MODEL IS NAMED, NOT SWEPT UP.
+     *
+     * Found in production, on the first settlement run after capture started
+     * creating a receivable instead of paying the merchant directly. Settlement
+     * gathered every succeeded unsettled payment and tried to draw the total
+     * from the receivable account. It failed, because payments captured under
+     * the OLD model had credited the merchant directly and never posted a
+     * receivable at all. The ledger refused to go negative, which is precisely
+     * what it is for, and settlement stopped entirely.
+     *
+     * The bug was not in settlement. Introducing a new money model left a
+     * question unanswered, and the unanswered question became a crash: what is
+     * the status of money that completed before the concept existed?
+     *
+     * The answer is explicit rather than clever. A payment either posted a
+     * receivable or it did not, settlement only takes the ones that did, and
+     * the others are COUNTED so that "why is the outstanding total not the sum
+     * of every succeeded payment" has an answer.
+     */
+    @Test
+    void lesson7_a_payment_from_before_the_receivable_model_does_not_break_settlement() throws Exception {
+        // one payment under the current model
+        sell("pi_new", "100.00", T0);
+        // and one exactly as the old code left them: succeeded, unsettled, with
+        // no receivable behind it
+        legacySale("pi_legacy", "70.00", T0);
+
+        assertEquals(1, Settlements.predatingReceivables(MERCHANT),
+                "the older payment is visible as what it is, rather than lurking in a total");
+        assertEquals(0, new BigDecimal("100.00").compareTo(Settlements.outstanding(MERCHANT)),
+                "and outstanding counts only what actually has money behind it");
+
+        Settlements.Batch b = assertDoesNotThrow(() -> Settlements.run(MERCHANT, "SIMEUR", DAY, T0),
+                "SETTLEMENT RUNS. Before the fix this threw and no merchant could be paid at all.");
+        assertNotNull(b);
+        assertEquals(1, b.items(), "it settled the one payment that had a receivable");
+        assertEquals(0, new BigDecimal("100.00").compareTo(b.gross()), "and nothing it could not back");
+        assertEquals(0, Settlements.receivableDrift(MERCHANT).signum(), "the two views still agree");
+        System.out.println("lesson 7: a payment predating the model was named and skipped, and settlement ran");
+    }
+
+    /** A sale exactly as the old code left it: succeeded and unsettled, with no
+     *  receivable posted behind it. */
+    private static void legacySale(String intentId, String amount, Instant at) throws Exception {
+        sell(intentId, amount, at);
+        try (Connection c = PayDb.open();
+             var ps = c.prepareStatement("UPDATE payment_intents SET receivable_posted = FALSE WHERE id = ?")) {
+            ps.setString(1, intentId);
+            ps.executeUpdate();
+        }
+        // and take the receivable back out, as it never would have been posted
+        try (Connection c = PayDb.open()) {
+            c.setAutoCommit(false);
+            java.util.UUID tx = java.util.UUID.randomUUID();
+            Ledger.claimTx(c, tx, "legacy.adjust", at);
+            Ledger.ensureAccount(c, "legacy:sink", "external", "SIMEUR");
+            Ledger.post(c, tx, at, java.util.List.of(
+                    new Ledger.Leg(Settlements.receivable(MERCHANT), new BigDecimal(amount).negate()),
+                    new Ledger.Leg("legacy:sink", new BigDecimal(amount))));
+            c.commit();
+        }
+    }
+
     // ------------------------------------------------------------------ helpers
 
     /** A completed sale: authorise on the processor's own funds, then capture. */
