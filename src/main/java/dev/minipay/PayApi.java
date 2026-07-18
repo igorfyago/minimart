@@ -186,9 +186,15 @@ public final class PayApi {
             String id = Json.str(body, "id");
             if (id == null || id.isBlank()) id = "pi_" + Long.toHexString(System.nanoTime());
 
+            // A payment method is OPTIONAL, and its absence is the older
+            // behaviour rather than an error: a caller that has not adopted
+            // payment methods yet still gets a wallet payment settled here.
+            // Requiring it would have broken every existing integration on the
+            // day the rails arrived, which is not how a processor may treat the
+            // merchants already using it.
             PaymentIntents.Result r = PaymentIntents.authorize(
                     id, new BigDecimal(amount), currency == null ? "SIMEUR" : currency,
-                    customer, merchant, businessAt(body));
+                    customer, merchant, Json.str(body, "payment_method"), businessAt(body));
             int status = r instanceof PaymentIntents.Ok ? 200 : (r instanceof PaymentIntents.Declined ? 402 : 409);
             String out = render(r);
             if (key != null) Idempotency.complete(key, status, out);
