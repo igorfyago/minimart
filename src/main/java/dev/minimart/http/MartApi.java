@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -150,6 +151,23 @@ public final class MartApi {
      * the simulation, which is the whole reason the simulation is worth
      * anything: it exercises the endpoint that real traffic would hit.
      */
+    private static PreparedStatement prepare(Connection c, String sql, String customer) throws SQLException {
+        PreparedStatement ps = c.prepareStatement(sql);
+        if (customer != null) ps.setLong(1, Long.parseLong(customer));
+        return ps;
+    }
+
+    /** One query-string parameter, or null. */
+    private static String param(HttpExchange ex, String key) {
+        String q = ex.getRequestURI().getQuery();
+        if (q == null) return null;
+        for (String pair : q.split("&")) {
+            int i = pair.indexOf('=');
+            if (i > 0 && pair.substring(0, i).equals(key)) return pair.substring(i + 1);
+        }
+        return null;
+    }
+
     private static void subscribe(HttpExchange ex) throws IOException {
         try {
             String body = read(ex);
@@ -159,10 +177,21 @@ public final class MartApi {
             String location = Json.str(body, "location");
             String interval = Json.str(body, "interval_days");
             Instant at = businessAt(body);
+            long before = subscriptionCount();
             UUID id = Billing.subscribe(tenant, customer, variant, location,
                     interval == null ? 30 : Integer.parseInt(interval), at);
-            send(ex, 200, "{\"subscription\":\"" + id + "\",\"status\":\"active\"}");
-        } catch (Exception e) { send(ex, 500, err(e)); }
+            // SUBSCRIBE IS IDEMPOTENT, so it may have created nothing and handed
+            // back a subscription the customer already had, possibly one that is
+            // in dunning. The first version answered "active" as a hardcoded
+            // string without ever looking, so a past_due customer was told they
+            // were fine by an endpoint that had not checked. A caller cannot
+            // recover from that, because from outside there is no other way to
+            // find out.
+            boolean created = subscriptionCount() > before;
+            send(ex, 200, "{\"subscription\":\"" + id + "\",\"status\":\"" + statusOf(id)
+                    + "\",\"created\":" + created + "}");
+        } catch (BadBusinessTime e) { send(ex, 400, err(e)); }
+        catch (Exception e) { send(ex, 500, err(e)); }
     }
 
     private static void unsubscribe(HttpExchange ex) throws IOException {
@@ -172,15 +201,30 @@ public final class MartApi {
             boolean atPeriodEnd = "true".equals(Json.str(body, "at_period_end"));
             Billing.cancel(id, atPeriodEnd, businessAt(body));
             send(ex, 200, "{\"subscription\":\"" + id + "\",\"canceled\":true,\"at_period_end\":" + atPeriodEnd + "}");
-        } catch (Exception e) { send(ex, 500, err(e)); }
+        } catch (BadBusinessTime e) { send(ex, 400, err(e)); }
+        catch (Exception e) { send(ex, 500, err(e)); }
     }
 
+    /**
+     * The dashboard view, and now also an answerable question.
+     *
+     * Without the filter this returns the twenty most recent subscriptions
+     * across every customer, which is fine for a dashboard and useless as an
+     * API: a customer cannot ask what they are subscribed to, and once twenty
+     * later subscriptions exist they silently vanish from the answer. The
+     * silence is the defect, since an empty result reads exactly like "you have
+     * no subscriptions" and a client cannot tell the two apart.
+     */
     private static void subscriptions(HttpExchange ex) throws IOException {
-        try (Connection c = Db.open();
-             PreparedStatement ps = c.prepareStatement("""
+        String customer = param(ex, "customer");
+        String sql = """
                      SELECT s.id, s.customer_id, s.variant_id, s.status, s.period_index, s.next_renewal_at,
                             (SELECT COUNT(*) FROM invoices i WHERE i.subscription_id = s.id AND i.status='paid')
-                     FROM subscriptions s ORDER BY s.business_at DESC LIMIT 20""");
+                     FROM subscriptions s
+                     """ + (customer == null ? "" : "WHERE s.customer_id = ? ")
+                     + "ORDER BY s.business_at DESC LIMIT " + (customer == null ? "20" : "200");
+        try (Connection c = Db.open();
+             PreparedStatement ps = prepare(c, sql, customer);
              ResultSet rs = ps.executeQuery()) {
             StringBuilder b = new StringBuilder("[");
             boolean first = true;
@@ -386,10 +430,52 @@ public final class MartApi {
         }
     }
 
+    /** Raised when business_at is present but unreadable. Deliberately a
+     *  distinct type, so the endpoints can answer 400 rather than folding it in
+     *  with every other failure as a 500. */
+    static final class BadBusinessTime extends RuntimeException {
+        BadBusinessTime(String value) {
+            super("business_at is not an ISO-8601 instant: " + value);
+        }
+    }
+
+    /**
+     * ABSENT MEANS NOW. UNREADABLE MEANS NO.
+     *
+     * The doctrine of this codebase is that time is a parameter and no business
+     * logic reads the wall clock, which is what lets a compressed year run in
+     * minutes. The first version broke it in a catch block: a business_at it
+     * could not parse was silently replaced with Instant.now(), with no error
+     * and no log.
+     *
+     * That is the worst available outcome. A client with a date-formatting bug
+     * gets a run that appears to work, is quietly pinned to the wall clock, and
+     * produces results nobody can reproduce, with nothing anywhere saying why.
+     * A missing timestamp still defaults to now, because a browser genuinely has
+     * no business time to send. A malformed one is a caller bug and is told so.
+     */
     private static Instant businessAt(String body) {
         String at = body == null ? null : Json.str(body, "business_at");
-        try { return at == null ? Instant.now() : Instant.parse(at); }
-        catch (Exception e) { return Instant.now(); }
+        if (at == null || at.isBlank()) return Instant.now();
+        try { return Instant.parse(at); }
+        catch (Exception e) { throw new BadBusinessTime(at); }
+    }
+
+    private static long subscriptionCount() throws SQLException {
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement("SELECT COUNT(*) FROM subscriptions");
+             ResultSet rs = ps.executeQuery()) {
+            rs.next();
+            return rs.getLong(1);
+        }
+    }
+
+    private static String statusOf(UUID subscriptionId) throws SQLException {
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement("SELECT status FROM subscriptions WHERE id = ?")) {
+            ps.setObject(1, subscriptionId);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getString(1) : "unknown"; }
+        }
     }
 
     private static String err(Exception e) {
