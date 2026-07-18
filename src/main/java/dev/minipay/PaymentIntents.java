@@ -39,11 +39,55 @@ public final class PaymentIntents {
     /** Authorise: money moves from the funding source into a hold. */
     public static Result authorize(String id, BigDecimal amount, String currency,
                                    String customer, String merchant, Instant businessAt) throws SQLException {
+        return authorize(id, amount, currency, customer, merchant, null, businessAt);
+    }
+
+    /**
+     * Authorise, on whichever rail the payment method belongs to.
+     *
+     * WITH a payment method, this behaves like a processor: the money is
+     * authorised at whichever issuer actually holds it, and the merchant is
+     * told only whether it worked. WITHOUT one, the older behaviour stands and
+     * the funding source is an account here, which is what the simulation used
+     * before there were any issuers to ask.
+     *
+     * The order of the two steps is the important part and it is deliberate:
+     * THE ISSUER IS ASKED FIRST, and this processor's own books move only after
+     * it says yes. Recording the money first and asking afterwards would mean
+     * every decline needed unwinding, and the window between the two would be a
+     * period where minipay believed it held money that no bank had agreed to.
+     */
+    public static Result authorize(String id, BigDecimal amount, String currency,
+                                   String customer, String merchant, String paymentMethodId,
+                                   Instant businessAt) throws SQLException {
         // Test instruments, the way every processor provides them: a customer
         // whose reference says "decline" always declines, so failure paths can
         // be exercised deterministically instead of hoped for.
         if (customer.contains("decline")) return new Declined("card_declined");
 
+        String rail = "WALLET";
+        String authorizationRef = null;
+        if (paymentMethodId != null) {
+            PaymentMethods.Method pm = PaymentMethods.find(paymentMethodId);
+            if (pm == null) return new Declined("no such payment method");
+            if (!"active".equals(pm.status())) return new Declined("payment method not usable");
+            rail = pm.rail();
+
+            Rails.Outcome outcome = Rails.authorize(rail, pm.instrument(), id, amount, currency, businessAt);
+            if (!outcome.approved()) {
+                // A DECLINE IS RECORDED, not merely returned. A processor that
+                // forgets its declines cannot answer the only question a
+                // merchant ever asks afterwards, which is why a customer could
+                // not pay.
+                recordDecline(id, amount, currency, customer, merchant, paymentMethodId, rail,
+                        outcome.declineReason(), businessAt);
+                return new Declined(outcome.declineReason());
+            }
+            authorizationRef = outcome.authorizationRef();
+        }
+
+        final String finalRail = rail;
+        final String finalAuthRef = authorizationRef;
         try (Connection c = PayDb.open()) {
             c.setAutoCommit(false);
             try {
@@ -52,21 +96,31 @@ public final class PaymentIntents {
                 Ledger.ensureAccount(c, balance(merchant), "merchant", currency);
 
                 try (PreparedStatement ps = c.prepareStatement("""
-                        INSERT INTO payment_intents(id, amount, currency, customer_ref, merchant_ref, status, business_at)
-                        VALUES (?,?,?,?,?, 'requires_capture', ?) ON CONFLICT (id) DO NOTHING""")) {
+                        INSERT INTO payment_intents(id, amount, currency, customer_ref, merchant_ref, status,
+                                                    business_at, payment_method, rail, issuer_authorization)
+                        VALUES (?,?,?,?,?, 'requires_capture', ?,?,?,?) ON CONFLICT (id) DO NOTHING""")) {
                     ps.setString(1, id); ps.setBigDecimal(2, amount); ps.setString(3, currency);
                     ps.setString(4, customer); ps.setString(5, merchant);
                     ps.setTimestamp(6, java.sql.Timestamp.from(businessAt));
+                    ps.setString(7, paymentMethodId); ps.setString(8, finalRail); ps.setString(9, finalAuthRef);
                     if (ps.executeUpdate() == 0) {   // already exists: report its current state
                         c.rollback();
                         return get(id);
                     }
                 }
-                UUID tx = derive("auth:" + id);
-                if (Ledger.claimTx(c, tx, "payment.authorized", businessAt)) {
-                    Ledger.post(c, tx, businessAt, List.of(
-                            new Ledger.Leg(source(customer), amount.negate()),
-                            new Ledger.Leg(holds(merchant), amount)));
+                // The processor's own ledger models money it is actually
+                // holding. On a card rail the money is held at the ISSUER, not
+                // here, so posting it here as well would double-count it: the
+                // same euro would appear on two banks' books at once. What
+                // minipay records for a card is the authorisation, and the
+                // clearing that follows.
+                if ("WALLET".equals(finalRail)) {
+                    UUID tx = derive("auth:" + id);
+                    if (Ledger.claimTx(c, tx, "payment.authorized", businessAt)) {
+                        Ledger.post(c, tx, businessAt, List.of(
+                                new Ledger.Leg(source(customer), amount.negate()),
+                                new Ledger.Leg(holds(merchant), amount)));
+                    }
                 }
                 c.commit();
                 return new Ok(id, "requires_capture", amount);
@@ -77,6 +131,25 @@ public final class PaymentIntents {
                 c.rollback();
                 throw e;
             }
+        }
+    }
+
+    /** A decline is a fact worth keeping. A merchant whose customer could not
+     *  pay asks exactly one question afterwards, and a processor with no record
+     *  of the refusal cannot answer it. */
+    private static void recordDecline(String id, BigDecimal amount, String currency, String customer,
+                                      String merchant, String paymentMethodId, String rail,
+                                      String reason, Instant businessAt) throws SQLException {
+        try (Connection c = PayDb.open();
+             PreparedStatement ps = c.prepareStatement("""
+                     INSERT INTO payment_intents(id, amount, currency, customer_ref, merchant_ref, status,
+                                                 business_at, payment_method, rail, decline_reason)
+                     VALUES (?,?,?,?,?, 'declined', ?,?,?,?) ON CONFLICT (id) DO NOTHING""")) {
+            ps.setString(1, id); ps.setBigDecimal(2, amount); ps.setString(3, currency);
+            ps.setString(4, customer); ps.setString(5, merchant);
+            ps.setTimestamp(6, java.sql.Timestamp.from(businessAt));
+            ps.setString(7, paymentMethodId); ps.setString(8, rail); ps.setString(9, reason);
+            ps.executeUpdate();
         }
     }
 
@@ -94,22 +167,34 @@ public final class PaymentIntents {
         try (Connection c = PayDb.open()) {
             c.setAutoCommit(false);
             try {
-                String status, customer, merchant, currency; BigDecimal amount;
-                try (PreparedStatement ps = c.prepareStatement(
-                        "SELECT status, customer_ref, merchant_ref, currency, amount FROM payment_intents WHERE id = ? FOR UPDATE")) {
+                String status, customer, merchant, currency, rail, authRef; BigDecimal amount;
+                try (PreparedStatement ps = c.prepareStatement("""
+                        SELECT status, customer_ref, merchant_ref, currency, amount, rail, issuer_authorization
+                          FROM payment_intents WHERE id = ? FOR UPDATE""")) {
                     ps.setString(1, id);
                     try (ResultSet rs = ps.executeQuery()) {
                         if (!rs.next()) { c.rollback(); return new NotFound(id); }
                         status = rs.getString(1); customer = rs.getString(2);
                         merchant = rs.getString(3); currency = rs.getString(4); amount = rs.getBigDecimal(5);
+                        rail = rs.getString(6); authRef = rs.getString(7);
                     }
                 }
                 String target = capture ? "succeeded" : "canceled";
                 if (target.equals(status)) { c.rollback(); return new Ok(id, status, amount); }  // idempotent
                 if (!"requires_capture".equals(status)) { c.rollback(); return new WrongState(id, status); }
 
+                // Tell the issuer BEFORE this processor's books say it is done.
+                // A capture recorded here that the issuer never performed is
+                // money this processor believes it has and no bank has released,
+                // and the merchant would be paid out of a balance that does not
+                // exist.
+                boolean railOk = capture
+                        ? Rails.capture(rail, authRef, businessAt)
+                        : Rails.release(rail, authRef, businessAt);
+                if (!railOk) { c.rollback(); return new Declined("issuer unavailable"); }
+
                 UUID tx = derive((capture ? "capture:" : "cancel:") + id);
-                if (Ledger.claimTx(c, tx, capture ? "payment.captured" : "payment.canceled", businessAt)) {
+                if ("WALLET".equals(rail) && Ledger.claimTx(c, tx, capture ? "payment.captured" : "payment.canceled", businessAt)) {
                     Ledger.post(c, tx, businessAt, capture
                             ? List.of(new Ledger.Leg(holds(merchant), amount.negate()),
                                       new Ledger.Leg(balance(merchant), amount))
