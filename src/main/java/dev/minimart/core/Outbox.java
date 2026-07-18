@@ -18,19 +18,27 @@ import java.util.List;
  */
 public final class Outbox {
 
-    public record Row(long id, String topic, String key, String payload, Instant businessAt) {}
+    public record Row(long id, String topic, String eventKey, String key, String payload, Instant businessAt) {}
 
     private Outbox() {}
 
-    /** Join the caller's transaction. Never opens its own connection. */
-    public static void append(Connection c, String topic, String key, String payload, Instant businessAt)
-            throws SQLException {
+    /** Join the caller's transaction. Never opens its own connection.
+     *
+     *  eventKey is the identity of the BUSINESS EVENT (`order.placed:<id>`),
+     *  written by the producer and unique, so the same event cannot be
+     *  announced twice. partitionKey is the ORDERING key Kafka partitions on.
+     *  They are different questions and conflating them is how a cancellation
+     *  overtakes its own placement. */
+    public static void append(Connection c, String topic, String eventKey, String partitionKey,
+                              String payload, Instant businessAt) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(
-                "INSERT INTO outbox(topic, key, payload, business_at) VALUES (?,?,?,?)")) {
+                "INSERT INTO outbox(topic, event_key, key, payload, business_at) VALUES (?,?,?,?,?) " +
+                "ON CONFLICT (event_key) DO NOTHING")) {
             ps.setString(1, topic);
-            ps.setString(2, key);
-            ps.setString(3, payload);
-            ps.setTimestamp(4, java.sql.Timestamp.from(businessAt));
+            ps.setString(2, eventKey);
+            ps.setString(3, partitionKey);
+            ps.setString(4, payload);
+            ps.setTimestamp(5, java.sql.Timestamp.from(businessAt));
             ps.executeUpdate();
         }
     }
@@ -38,12 +46,12 @@ public final class Outbox {
     public static List<Row> pending(Connection c, int limit) throws SQLException {
         List<Row> out = new ArrayList<>();
         try (PreparedStatement ps = c.prepareStatement(
-                "SELECT id, topic, key, payload, business_at FROM outbox " +
+                "SELECT id, topic, event_key, key, payload, business_at FROM outbox " +
                 "WHERE published_at IS NULL ORDER BY id LIMIT ?")) {
             ps.setInt(1, limit);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) out.add(new Row(rs.getLong(1), rs.getString(2), rs.getString(3),
-                        rs.getString(4), rs.getTimestamp(5).toInstant()));
+                        rs.getString(4), rs.getString(5), rs.getTimestamp(6).toInstant()));
             }
         }
         return out;

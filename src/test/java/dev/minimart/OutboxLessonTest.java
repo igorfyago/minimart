@@ -76,7 +76,7 @@ class OutboxLessonTest {
              PreparedStatement ps = c.prepareStatement("SELECT topic, key, payload FROM outbox");
              ResultSet rs = ps.executeQuery()) {
             rs.next();
-            assertEquals("minimart.orders", rs.getString(1));
+            assertEquals("minimart.orders.v1", rs.getString(1));
             assertEquals(good.toString(), rs.getString(2),
                     "partitioned by ORDER id, so a cancel can never overtake its own placement");
             assertTrue(rs.getString(3).contains("order.placed"), rs.getString(3));
@@ -97,7 +97,7 @@ class OutboxLessonTest {
         assertEquals(1, sent);
         assertEquals(0, pendingCount(), "marked only once the broker acknowledged it");
         // and it really is on the topic, not merely marked
-        assertTrue(readTopic("minimart.orders").stream().anyMatch(v -> v.contains(id.toString())),
+        assertTrue(readTopic("minimart.orders.v1").stream().anyMatch(v -> v.contains(id.toString())),
                 "the event is genuinely on the broker");
 
         // a second pass has nothing to do: publishing is not repeated

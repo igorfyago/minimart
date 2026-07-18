@@ -45,6 +45,11 @@ public final class Checkout {
      *  and recovery cannot be exercised by a population that always pays. */
     public static final java.util.Set<Long> declineCustomerIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    /** Fault injection: make the CAPTURE fail while authorisation still works.
+     *  A simulated economy needs the partial failures too, and this one matters
+     *  because "authorised" and "captured" are different claims about money. */
+    public static volatile boolean captureSabotage = false;
+
     static String customerRef(long customerId) {
         return declineCustomerIds.contains(customerId) ? "cust_decline_" + customerId : "cust_" + customerId;
     }
@@ -113,6 +118,7 @@ public final class Checkout {
     }
 
     private static boolean settle(UUID orderId, String action, Instant businessAt) {
+        if (captureSabotage && "capture".equals(action)) return false;
         try {
             HttpResponse<String> r = http.send(
                     HttpRequest.newBuilder(URI.create(

@@ -43,7 +43,11 @@ public final class OutboxRelay {
             for (Outbox.Row row : Outbox.pending(c, limit)) {
                 // .get() blocks for the acknowledgement on purpose: we must not
                 // mark anything published on the strength of a hope
-                producer.send(new ProducerRecord<>(row.topic(), row.key(), row.payload())).get();
+                ProducerRecord<String, String> rec =
+                        new ProducerRecord<>(row.topic(), row.key(), row.payload());
+                // the consumer must never have to invent the dedup key
+                rec.headers().add("event_key", row.eventKey().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                producer.send(rec).get();
                 Outbox.markPublished(c, row.id(), Instant.now());
                 sent++;
             }

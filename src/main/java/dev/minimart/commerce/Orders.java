@@ -38,7 +38,7 @@ public final class Orders {
     public static final Duration RESERVATION_TTL = Duration.ofMinutes(30);
 
     /** Order lifecycle events. Partitioned by order id, so per-order ordering holds. */
-    public static final String TOPIC_ORDERS = "minimart.orders";
+    public static final String TOPIC_ORDERS = "minimart.orders.v1";
 
     private Orders() {}
 
@@ -161,8 +161,9 @@ public final class Orders {
                 // rolls back, the world is never told about an order that did
                 // not happen. Keyed by order id, so a later cancellation can
                 // never overtake its own placement on the topic.
-                dev.minimart.core.Outbox.append(c, TOPIC_ORDERS, orderId.toString(),
-                        "{\"type\":\"order.placed\",\"orderId\":\"" + orderId + "\",\"tenant\":\"" + tenant +
+                dev.minimart.core.Outbox.append(c, TOPIC_ORDERS,
+                        "order.placed:" + orderId, orderId.toString(),
+                        "{\"type\":\"order.placed\",\"eventKey\":\"order.placed:" + orderId + "\",\"orderId\":\"" + orderId + "\",\"tenant\":\"" + tenant +
                         "\",\"customer\":" + customerId + ",\"variant\":\"" + variantId + "\",\"qty\":" + qty +
                         ",\"amount\":\"" + amount.toPlainString() + "\",\"at\":\"" + businessAt + "\"}",
                         businessAt);
@@ -240,8 +241,9 @@ public final class Orders {
                         "UPDATE orders SET state = ? WHERE id = ?")) {
                     ps.setString(1, orderState); ps.setObject(2, orderId); ps.executeUpdate();
                 }
-                dev.minimart.core.Outbox.append(c, TOPIC_ORDERS, orderId.toString(),
-                        "{\"type\":\"order." + orderState + "\",\"orderId\":\"" + orderId +
+                dev.minimart.core.Outbox.append(c, TOPIC_ORDERS,
+                        "order." + orderState + ":" + orderId, orderId.toString(),
+                        "{\"type\":\"order." + orderState + "\",\"eventKey\":\"order." + orderState + ":" + orderId + "\",\"orderId\":\"" + orderId +
                         "\",\"tenant\":\"" + tenant + "\",\"customer\":" + customerId +
                         ",\"variant\":\"" + variantId + "\",\"qty\":" + qty +
                         ",\"amount\":\"" + amount.toPlainString() + "\",\"at\":\"" + businessAt + "\"}",

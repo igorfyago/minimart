@@ -41,22 +41,50 @@ public final class Billing {
 
     private static UUID derive(String s) { return UUID.nameUUIDFromBytes(s.getBytes(StandardCharsets.UTF_8)); }
 
-    /** Start a subscription and bill period 0 immediately. */
+    /** Start a subscription and bill period 0 immediately.
+     *
+     *  The id is derived so a retried subscribe is idempotent, but derived
+     *  from a GENERATION as well, so a customer who cancelled can come back.
+     *  The first version keyed on (tenant, customer, variant) alone with
+     *  ON CONFLICT DO NOTHING, which meant a cancelled customer's resubscribe
+     *  silently did nothing and handed back the dead subscription. */
     public static UUID subscribe(String tenant, long customerId, String variantId, String location,
                                  int intervalDays, Instant businessAt) throws SQLException {
-        UUID id = derive("sub:" + tenant + ':' + customerId + ':' + variantId);
-        try (Connection c = Db.open();
-             PreparedStatement ps = c.prepareStatement("""
-                     INSERT INTO subscriptions(id, tenant, customer_id, variant_id, location, status,
-                                               interval_days, period_index, next_renewal_at, business_at)
-                     VALUES (?,?,?,?,?, 'active', ?, 0, ?, ?) ON CONFLICT (id) DO NOTHING""")) {
-            ps.setObject(1, id); ps.setString(2, tenant); ps.setLong(3, customerId);
-            ps.setString(4, variantId); ps.setString(5, location); ps.setInt(6, intervalDays);
-            ps.setTimestamp(7, java.sql.Timestamp.from(businessAt));   // due now: bill period 0
-            ps.setTimestamp(8, java.sql.Timestamp.from(businessAt));
-            ps.executeUpdate();
+        try (Connection c = Db.open()) {
+            c.setAutoCommit(false);
+            try {
+                // a live subscription for this product is returned as-is: idempotent
+                try (PreparedStatement ps = c.prepareStatement("""
+                        SELECT id FROM subscriptions
+                        WHERE tenant = ? AND customer_id = ? AND variant_id = ?
+                          AND status IN ('active','past_due','paused')""")) {
+                    ps.setString(1, tenant); ps.setLong(2, customerId); ps.setString(3, variantId);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) { UUID live = (UUID) rs.getObject(1); c.rollback(); return live; }
+                    }
+                }
+                // dead ones become earlier generations, so the new id is genuinely new
+                int generation;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT COUNT(*) FROM subscriptions WHERE tenant = ? AND customer_id = ? AND variant_id = ?")) {
+                    ps.setString(1, tenant); ps.setLong(2, customerId); ps.setString(3, variantId);
+                    try (ResultSet rs = ps.executeQuery()) { rs.next(); generation = rs.getInt(1); }
+                }
+                UUID id = derive("sub:" + tenant + ':' + customerId + ':' + variantId + ':' + generation);
+                try (PreparedStatement ps = c.prepareStatement("""
+                        INSERT INTO subscriptions(id, tenant, customer_id, variant_id, location, status,
+                                                  interval_days, period_index, next_renewal_at, business_at)
+                        VALUES (?,?,?,?,?, 'active', ?, 0, ?, ?) ON CONFLICT (id) DO NOTHING""")) {
+                    ps.setObject(1, id); ps.setString(2, tenant); ps.setLong(3, customerId);
+                    ps.setString(4, variantId); ps.setString(5, location); ps.setInt(6, intervalDays);
+                    ps.setTimestamp(7, java.sql.Timestamp.from(businessAt));
+                    ps.setTimestamp(8, java.sql.Timestamp.from(businessAt));
+                    ps.executeUpdate();
+                }
+                c.commit();
+                return id;
+            } catch (SQLException | RuntimeException e) { c.rollback(); throw e; }
         }
-        return id;
     }
 
     /**
@@ -102,13 +130,21 @@ public final class Billing {
             Checkout.Result r = Checkout.place(orderId, d.tenant(), d.customerId(),
                     d.variantId(), d.location(), 1, now);
 
-            if (r instanceof Checkout.Placed p) {
-                Checkout.ship(orderId, now);                       // a renewal ships immediately
+            // AUTHORISED IS NOT CAPTURED. The first version threw this boolean
+            // away and marked the invoice paid regardless, so a capture that
+            // never landed still read as revenue.
+            boolean captured = (r instanceof Checkout.Placed) && Checkout.ship(orderId, now);
+
+            if (r instanceof Checkout.Placed p && captured) {
                 markInvoice(invoiceId, "paid", p.amount(), now);
                 advance(d.id(), period, now.plus(Duration.ofDays(d.intervalDays())), "active", now);
                 if (retrying) { recordDunning(d.id(), period, attemptsFor(d.id(), period) + 1, "recovered", now); recovered++; }
                 renewed++;
             } else {
+                // authorised but not captured: give the goods and the hold back
+                // before treating the period as failed, or the customer keeps a
+                // reservation and an authorisation for something never delivered
+                if (r instanceof Checkout.Placed) Checkout.cancel(orderId, now);
                 int attempt = attemptsFor(d.id(), period) + 1;
                 markInvoice(invoiceId, "failed", BigDecimal.ZERO, now);
                 if (attempt > DUNNING_BACKOFF_DAYS.length) {
