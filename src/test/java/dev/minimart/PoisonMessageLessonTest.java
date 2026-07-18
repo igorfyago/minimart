@@ -282,6 +282,61 @@ class PoisonMessageLessonTest {
         System.out.println("lesson 5: same event, A failed and B succeeded, tracked separately");
     }
 
+    /**
+     * LESSON 6 · AN EVENT OLDER THAN THE CONSUMER IS NOT A POISON EVENT.
+     *
+     * This one came from production, and the way it arrived is the lesson. The
+     * replenishment consumer shipped, joined a topic that had been running for
+     * weeks, read the backlog from the beginning as a new consumer group does,
+     * and buried 426 perfectly ordinary historical orders as poison. Nothing was
+     * broken. But a dead letter queue holding 426 non-problems is worse than an
+     * empty one, because the first real failure is now invisible in the noise.
+     *
+     * The cause is structural, not a slip: a topic is a DURABLE LOG, so a
+     * consumer joining it reads events produced before it existed, by a producer
+     * that had never heard of it. `location` was added to order.placed when the
+     * warehouse started caring where goods were, and every order before that is
+     * legitimately without it.
+     *
+     * So a consumer must tolerate versions of an event older than itself, and
+     * the distinction it has to draw is between an event it does not RECOGNISE,
+     * which is a real defect, and one it recognises but cannot ACT on, which is
+     * just history. The second is counted, never silent, because a consumer
+     * quietly skipping part of its input is the exact failure the completeness
+     * audits exist to make impossible.
+     */
+    @Test
+    void lesson6_an_event_older_than_the_consumer_is_skipped_not_buried() throws Exception {
+        EventRuntime runtime = runtime(Replenishment.CONSUMER);
+        long skippedBefore = Replenishment.unactionable.get();
+
+        // exactly the shape order.placed had before `location` was added
+        String oldKey = "order.placed:" + UUID.randomUUID();
+        String oldShape = "{\"type\":\"order.placed\",\"eventKey\":\"" + oldKey + "\",\"orderId\":\""
+                + UUID.randomUUID() + "\",\"tenant\":\"" + TENANT + "\",\"customer\":1,\"variant\":\""
+                + GOOD + "\",\"qty\":5,\"amount\":\"100.00\",\"at\":\"" + T0 + "\"}";
+
+        assertEquals(EventRuntime.Result.HANDLED, runtime.apply(oldKey, oldShape, T0),
+                "an event this consumer simply predates is a decision, not a failure");
+        assertEquals(0, EventRuntime.deadLetterCount(Replenishment.CONSUMER),
+                "and it is NOT buried, or the queue fills with history nobody can act on");
+        assertEquals(0, EventRuntime.pendingRetryCount(Replenishment.CONSUMER),
+                "nor retried, since no number of retries will add a field to a past event");
+        assertEquals(skippedBefore + 1, Replenishment.unactionable.get(),
+                "it is counted, because a consumer skipping its input must never be silent about it");
+
+        // but an event it does not recognise AT ALL is still a real defect
+        String brokenKey = "order.placed:" + UUID.randomUUID();
+        String broken = "{\"type\":\"order.placed\",\"eventKey\":\"" + brokenKey + "\",\"qty\":5}";
+        for (int i = 0; i < EventRuntime.DEFAULT_MAX_ATTEMPTS; i++) {
+            runtime.apply(brokenKey, broken, T0);
+        }
+        assertEquals(1, EventRuntime.deadLetterCount(Replenishment.CONSUMER),
+                "a genuinely unrecognisable event is still buried, so the guard did not make the system blind");
+        System.out.println("lesson 6: an event predating the consumer was skipped and counted; "
+                + "an unrecognisable one was still buried");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static EventRuntime runtime(String group) {

@@ -33,6 +33,13 @@ public final class Replenishment {
      *  event path can be exercised without breaking anything else. */
     public static volatile String refuseVariant = null;
 
+    /** Events this consumer understood but could not act on, almost always
+     *  because they predate a field it needs. Exposed rather than swallowed:
+     *  a consumer quietly skipping part of its input is the exact failure the
+     *  completeness audits exist to make impossible. */
+    public static final java.util.concurrent.atomic.AtomicLong unactionable =
+            new java.util.concurrent.atomic.AtomicLong();
+
     private Replenishment() {}
 
     /**
@@ -50,11 +57,34 @@ public final class Replenishment {
         String tenant = Json.str(payload, "tenant");
         String variant = Json.str(payload, "variant");
         String location = Json.str(payload, "location");
-        if (tenant == null || variant == null || location == null) {
-            // The contract was not met. This will never succeed however many
-            // times it is retried, so it belongs in the dead letter queue where
-            // somebody will see it, not in a retry loop that hides it.
-            throw new IllegalArgumentException("order.placed is missing tenant, variant or location: " + payload);
+
+        if (tenant == null || variant == null) {
+            // Not a shape this consumer recognises at all. It will never succeed
+            // however often it is retried, so it belongs in the dead letter
+            // queue where somebody will see it, not in a retry loop that hides it.
+            throw new IllegalArgumentException("order.placed is missing tenant or variant: " + payload);
+        }
+
+        if (location == null) {
+            // OLDER THAN THIS CONSUMER, and that is not an error.
+            //
+            // A topic is a durable log, so a consumer joining it reads history
+            // produced before it existed, by a producer that had never heard of
+            // it. `location` was added to this event when the warehouse started
+            // caring where the goods were, and every order placed before that
+            // is legitimately without it.
+            //
+            // Found in production, and it is worth recording how: this consumer
+            // shipped, read the backlog, and buried 426 perfectly ordinary
+            // historical orders as poison. Nothing was broken, but a dead letter
+            // queue with 426 non-problems in it is worse than useless, because
+            // the one real failure would be invisible in the noise.
+            //
+            // A consumer must therefore tolerate versions of an event older than
+            // itself. Counted rather than silent, because "we skipped some" is
+            // exactly the kind of thing that should never be a secret.
+            unactionable.incrementAndGet();
+            return;
         }
 
         if (variant.equals(refuseVariant)) {
