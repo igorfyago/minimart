@@ -32,6 +32,13 @@ human authorises.
 Java 21 (virtual threads, raw JDBC, JDK HttpServer) · PostgreSQL 16 · Apache Kafka · Redis · Flyway ·
 Prometheus and Grafana · Docker.
 
+## Live
+
+- **The shop** · [mart.b4rruf3t.com](https://mart.b4rruf3t.com) · browse, buy, watch inventory and the audits move,
+  and press one button to turn a population of agent customers loose on it.
+- **The processor** · [pay.b4rruf3t.com](https://pay.b4rruf3t.com) · payment intents, merchant balance, and an
+  interactive idempotency demo that fires the same request twice and shows you the identical response.
+
 ## Running it
 
 ```bash
