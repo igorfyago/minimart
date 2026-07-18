@@ -5,84 +5,143 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>minimart · a shop with a simulated economy</title>
 <style>
-  :root {
-    --bg:#0a0d13; --card:#111722; --line:#1e2836; --text:#e6edf3; --dim:#8b98a9;
-    --accent:#58a6ff; --green:#31e981; --violet:#a78bff; --amber:#f5b43c; --red:#ff6b81;
-  }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text);
-    font:15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  /* ------------------------------------------------------------------------
+     THE HOUSE STYLE, TAKEN FROM minibank VERBATIM.
+     Same tokens, same type scale, same card and pill treatment, same accents.
+     One design system across bank, mart and pay, because four services that
+     look like four different projects read as four different projects.
+     ------------------------------------------------------------------------ */
+  :root { --bg:#0d1117; --panel:#161b22; --line:#21262d; --text:#e6edf3; --dim:#8b949e;
+          --green:#3fb950; --red:#f85149; --amber:#d29922; --accent:#58a6ff; --violet:#bc8cff; }
+  * { box-sizing:border-box; margin:0; scrollbar-width:thin; scrollbar-color:#2a3140 transparent; }
+  *::-webkit-scrollbar { width:8px; height:8px; }
+  *::-webkit-scrollbar-thumb { background:#2a3140; border-radius:999px; }
+  *::-webkit-scrollbar-thumb:hover { background:#3a4356; }
+  *::-webkit-scrollbar-track, *::-webkit-scrollbar-corner { background:transparent; }
+  body { background:var(--bg); color:var(--text); font:14px/1.5 system-ui,'Segoe UI',sans-serif; }
   a { color:var(--accent); }
-  header { display:flex; align-items:center; gap:14px; padding:16px 22px;
-    border-bottom:1px solid var(--line); position:sticky; top:0; background:rgba(10,13,19,.94);
-    backdrop-filter:blur(10px); z-index:20; flex-wrap:wrap; }
-  h1 { font-size:19px; margin:0; font-weight:750; letter-spacing:-.01em; }
+
+  header { display:flex; align-items:center; gap:20px; padding:14px 22px;
+           border-bottom:1px solid var(--line); position:sticky; top:0; z-index:20;
+           background:rgba(13,17,23,.94); backdrop-filter:blur(10px); flex-wrap:wrap; }
+  h1 { font-size:17px; font-weight:650; }
   h1 span { color:var(--accent); }
-  .tag { color:var(--dim); font-size:12.5px; }
-  nav { margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; }
-  .tab { background:none; border:1px solid var(--line); color:var(--dim); padding:6px 13px;
-    border-radius:999px; cursor:pointer; font-size:12.5px; font-family:inherit; }
-  .tab.on { background:var(--accent); border-color:var(--accent); color:#04101f; font-weight:650; }
-  main { padding:22px; max-width:1240px; margin:0 auto; }
+  .tag { color:var(--dim); font-size:12px; }
+  nav { display:flex; gap:6px; margin-left:auto; flex-wrap:wrap; }
+  .tab { background:none; border:1px solid var(--line); color:var(--dim); padding:6px 16px;
+         border-radius:999px; font:600 13px system-ui; cursor:pointer; text-decoration:none; }
+  .tab.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+
+  main { max-width:1100px; margin:0 auto; padding:22px; }
   section.hidden { display:none; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin-bottom:16px; }
-  h2 { font-size:15px; margin:0 0 4px; font-weight:700; }
-  .sub { color:var(--dim); font-size:12.5px; margin-bottom:14px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(250px,100%),1fr)); gap:12px; }
-  .prod { background:#0b0f16; border:1px solid var(--line); border-radius:12px; padding:15px 16px;
-    display:flex; flex-direction:column; }
-  .prod h3 { margin:0; font-size:15px; }
-  .price { font-size:24px; font-weight:750; color:var(--green); margin:8px 0 2px; font-variant-numeric:tabular-nums; }
-  .stockline { font-size:11.5px; color:var(--dim); margin-bottom:12px; }
-  .pill { display:inline-block; font-size:10px; padding:2px 7px; border-radius:999px; margin-right:5px;
-    border:1px solid var(--line); color:var(--dim); }
-  button.buy { margin-top:auto; background:var(--accent); border:none; color:#04101f; font-weight:700;
-    padding:9px 0; border-radius:9px; cursor:pointer; font-size:13.5px; font-family:inherit; }
-  button.buy:hover { filter:brightness(1.1); }
-  button.buy:disabled { background:#243044; color:var(--dim); cursor:not-allowed; }
-  /* every row the same height, so a card left alone on the last row does not
-     shrink to fit its own text and make the set look ragged */
-  .stats { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(160px,100%),1fr));
-    gap:12px; grid-auto-rows:1fr; }
-  .stat { background:#0b0f16; border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
-  .stat .k { font-size:10.5px; color:var(--dim); text-transform:uppercase; letter-spacing:.07em; }
-  .stat .v { font-size:26px; font-weight:750; color:var(--green); font-variant-numeric:tabular-nums; line-height:1.2; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:18px;
+          margin-bottom:16px; }
+  .card h2 { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.05em;
+             margin-bottom:10px; font-weight:600; }
+  .sub { color:var(--dim); font-size:12px; margin-bottom:14px; }
+  .muted { color:var(--dim); font-size:12px; }
+
+  button.primary { background:var(--accent); border:none; color:#fff; padding:9px 18px; border-radius:8px;
+                   font:600 13px system-ui; cursor:pointer; }
+  button.ghost { background:none; border:1px solid var(--line); color:var(--text); padding:8px 14px;
+                 border-radius:8px; font:600 13px system-ui; cursor:pointer; }
+  .mini { background:none; border:1px solid var(--line); color:var(--text); padding:3px 10px;
+          border-radius:7px; font:600 11px system-ui; cursor:pointer; }
+  .mini:hover { border-color:var(--violet); color:var(--violet); }
+  input, select { background:var(--bg); border:1px solid var(--line); color:var(--text); padding:9px 10px;
+                  border-radius:8px; font:14px system-ui; }
+  input[type=number] { width:92px; }
+  label { font-size:12px; color:var(--dim); }
+
   table { width:100%; border-collapse:collapse; font-size:12.5px; }
-  th { text-align:left; color:var(--dim); font-weight:600; font-size:10.5px; text-transform:uppercase;
-    letter-spacing:.06em; padding:7px 10px; border-bottom:1px solid var(--line); }
-  td { padding:7px 10px; border-bottom:1px solid rgba(255,255,255,.04); font-variant-numeric:tabular-nums; }
-  .s-fulfilled { color:var(--green); } .s-reserved { color:var(--amber); } .s-aborted { color:var(--dim); }
-  .mono { font-family:'Cascadia Code', Consolas, monospace; font-size:11.5px; color:var(--dim); }
+  th { text-align:left; color:var(--dim); font-weight:600; padding:5px 8px; border-bottom:1px solid var(--line); }
+  td { padding:5px 8px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
+  .amount-pos { color:var(--green); } .amount-neg { color:var(--red); }
   .ok { color:var(--green); } .bad { color:var(--red); }
-  .audit { display:flex; gap:16px; flex-wrap:wrap; align-items:center; font-size:12.5px; }
+  .mono, .ek { font-family:'Cascadia Code', Consolas, monospace; font-size:11.5px; color:var(--dim); }
+
+  /* ---------------------------------------------------------------- the shop
+     Built from the same tokens, not from a second design language. The
+     product tile is minibank's .prod tile with room for a price and a buy. */
+  .shop-head { display:flex; align-items:flex-end; gap:16px; flex-wrap:wrap; margin-bottom:20px; }
+  .shop-title { font-size:28px; font-weight:800; letter-spacing:-.6px; }
+  .shop-title span { background:linear-gradient(90deg, var(--accent), var(--violet));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .shop-meta { margin-left:auto; display:flex; gap:8px; align-items:center; }
+
+  /* Three across, not four. A wider tile leaves room for a product to be
+     described rather than merely listed, and five products across four columns
+     leaves one stranded on a row of its own. */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(300px,100%),1fr)); gap:14px;
+          align-items:stretch; }
+  .prod { position:relative; display:flex; flex-direction:column; min-width:0;
+          background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden;
+          transition:border-color .18s, transform .18s, box-shadow .18s; }
+  .prod:hover { border-color:var(--violet); transform:translateY(-2px);
+                box-shadow:0 10px 30px rgba(0,0,0,.35); }
+  .prod-art { height:148px; display:flex; align-items:center; justify-content:center; font-size:46px;
+              border-bottom:1px solid var(--line); position:relative; }
+  /* the stock state lives on the art as a quiet chip, so a healthy shelf is not
+     five progress bars competing with the prices */
+  .stock-chip { position:absolute; top:10px; right:11px; font-size:10px; letter-spacing:.04em;
+    padding:3px 8px; border-radius:999px; background:rgba(13,17,23,.72); border:1px solid var(--line);
+    color:var(--dim); backdrop-filter:blur(4px); }
+  .stock-chip.low { color:var(--amber); border-color:#d2992255; }
+  .stock-chip.none { color:var(--red); border-color:#f8514955; }
+  .prod-body { padding:14px 15px 15px; display:flex; flex-direction:column; flex:1; }
+  .prod-name { font-size:15px; font-weight:650; line-height:1.3; }
+  .prod-blurb { color:var(--dim); font-size:12px; margin-top:4px; min-height:32px; }
+  .prod-foot { display:flex; align-items:baseline; gap:8px; margin:12px 0 12px; }
+  .prod-val { font-size:22px; font-weight:750; font-variant-numeric:tabular-nums; letter-spacing:-.3px; }
+  .prod-per { color:var(--dim); font-size:11.5px; }
+  /* quiet by default, and the gradient arrives on hover. Five gradient buttons
+     shouting at once is a demo; one arriving under the cursor is a shop. */
+  button.buy { margin-top:auto; width:100%; border:1px solid var(--line); border-radius:10px; padding:10px 0;
+    font:650 13px system-ui; cursor:pointer; color:var(--text); background:var(--bg);
+    transition:background .18s, border-color .18s, color .18s; }
+  .prod:hover button.buy:not(:disabled) { background:linear-gradient(135deg, var(--accent), var(--violet));
+    border-color:transparent; color:#fff; }
+  button.buy:disabled { color:var(--dim); cursor:not-allowed; }
+
+  .stats { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(160px,100%),1fr));
+           gap:10px; grid-auto-rows:1fr; }
+  .stat { border:1px solid var(--line); border-radius:14px; padding:11px 13px; background:var(--panel); }
+  .stat .k, .stat span { color:var(--dim); font-size:11.5px; font-weight:650; }
+  .stat .v, .stat b { display:block; font-size:16px; font-weight:700; margin:3px 0 1px;
+                      font-variant-numeric:tabular-nums; color:var(--text); }
+
+  .audit { display:flex; gap:16px; flex-wrap:wrap; align-items:center; font-size:12px; }
   .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:6px; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  input[type=number] { background:#0b0f16; border:1px solid var(--line); color:var(--text);
-    border-radius:8px; padding:7px 10px; width:90px; font-family:inherit; }
-  label { font-size:12.5px; color:var(--dim); }
   .note { font-size:12px; color:var(--dim); border-left:2px solid var(--line); padding-left:12px; margin-top:14px; }
-  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#0b0f16;
-    border:1px solid var(--accent); border-radius:10px; padding:11px 18px; font-size:13px;
-    opacity:0; transition:opacity .25s; pointer-events:none; z-index:50; }
+  .pill { display:inline-block; font-size:10px; padding:2px 7px; border-radius:999px; margin-right:5px;
+          border:1px solid var(--line); color:var(--dim); }
+  .s-fulfilled { color:var(--green); } .s-reserved { color:var(--amber); } .s-aborted { color:var(--dim); }
+
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:rgba(22,27,34,.97);
+    border:1px solid var(--violet); border-radius:12px; padding:12px 18px; font-size:13px;
+    box-shadow:0 8px 44px rgba(122,92,255,.28); opacity:0; transition:opacity .25s;
+    pointer-events:none; z-index:50; }
   .toast.show { opacity:1; }
+
+  /* revenue */
   .wf { display:flex; flex-direction:column; gap:8px; margin-top:6px; }
   .wf-row { display:grid; grid-template-columns:150px 1fr 110px; align-items:center; gap:12px; font-size:13px; }
   .wf-bar { height:22px; border-radius:5px; min-width:2px; transition:width .4s ease; }
   .wf-amt { text-align:right; font-variant-numeric:tabular-nums; }
-  .wf-row[data-k="new"] .wf-bar { background:#2ecc71; }
-  .wf-row[data-k="reactivation"] .wf-bar { background:#3ba3ff; }
-  .wf-row[data-k="expansion"] .wf-bar { background:#9b7bff; }
-  .wf-row[data-k="contraction"] .wf-bar { background:#e8a33d; }
-  .wf-row[data-k="churn"] .wf-bar { background:#e5484d; }
-  .k-new { color:#2ecc71; font-weight:600; }
-  .k-reactivation { color:#3ba3ff; font-weight:600; }
-  .k-expansion { color:#9b7bff; font-weight:600; }
-  .k-contraction { color:#e8a33d; font-weight:600; }
-  .k-churn { color:#e5484d; font-weight:600; }
+  .wf-row[data-k="new"] .wf-bar { background:var(--green); }
+  .wf-row[data-k="reactivation"] .wf-bar { background:var(--accent); }
+  .wf-row[data-k="expansion"] .wf-bar { background:var(--violet); }
+  .wf-row[data-k="contraction"] .wf-bar { background:var(--amber); }
+  .wf-row[data-k="churn"] .wf-bar { background:var(--red); }
+  .k-new { color:var(--green); font-weight:650; }
+  .k-reactivation { color:var(--accent); font-weight:650; }
+  .k-expansion { color:var(--violet); font-weight:650; }
+  .k-contraction { color:var(--amber); font-weight:650; }
+  .k-churn { color:var(--red); font-weight:650; }
   .prov { font-size:10px; letter-spacing:.5px; padding:2px 6px; border-radius:4px;
-    border:1px solid var(--line); color:var(--dim); }
-  .prov.MEASURED { border-color:#2ecc7155; color:#2ecc71; }
-  .ek { font-family:ui-monospace,monospace; font-size:11px; color:var(--dim); }
+          border:1px solid var(--line); color:var(--dim); }
+  .prov.MEASURED { border-color:#3fb95055; color:var(--green); }
 </style>
 </head>
 <body>
@@ -101,14 +160,28 @@
 <main>
   <!-- ================= SHOP ================= -->
   <section id="shop">
-    <div class="card">
-      <h2>The storefront</h2>
-      <div class="sub">Every purchase here is real inside this system: it reserves stock in one database and
-        authorises money in another, over HTTP, then captures on shipment. No money you own is ever involved.</div>
-      <div class="grid" id="products"><span class="sub">loading the catalogue…</span></div>
+    <div class="shop-head">
+      <div>
+        <div class="shop-title">helix <span>supply</span></div>
+        <div class="muted">Subscriptions and one-off orders, settled on a real ledger.</div>
+      </div>
+      <div class="shop-meta">
+        <span class="pill" id="shopper">you are customer</span>
+        <button class="mini" id="refresh-shop">Refresh</button>
+      </div>
+    </div>
+
+    <div class="grid" id="products">
+      <div class="prod"><div class="prod-art"></div><div class="prod-body"><div class="muted">loading the catalogue</div></div></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>What a purchase actually does</h2>
+      <div class="sub">Reserves stock in one database and authorises money in another, over HTTP, then
+        captures on shipment. No money you own is ever involved.</div>
       <div class="note">Stock is a second double-entry ledger. A stock account's currency is
-        <code>UNIT:{product}</code>, so "you cannot oversell" and "you cannot overdraw" are the same rule, checked
-        once under a row lock. Overselling is not defended against here, it is impossible to express.</div>
+        <code>UNIT:{product}</code>, so "you cannot oversell" and "you cannot overdraw" are the same rule,
+        checked once under a row lock. Overselling is not defended against here, it is impossible to express.</div>
     </div>
   </section>
 
@@ -215,6 +288,9 @@ const money = v => '€' + Number(v).toLocaleString('en-US', {minimumFractionDig
 const uuid = () => crypto.randomUUID();
 let CUSTOMER = 7000 + Math.floor(Math.random() * 2000);
 
+const refresh = document.querySelector('#refresh-shop');
+if (refresh) refresh.onclick = () => loadProducts();
+
 document.querySelectorAll('.tab[data-tab]').forEach(b => b.onclick = () => {
   document.querySelectorAll('.tab[data-tab]').forEach(x => x.classList.toggle('on', x === b));
   if (b.dataset.tab === 'rev') loadRevenue();
@@ -226,22 +302,65 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('show'), 2600);
 }
 
+// A stable colour per product, derived from its id, so the shelf looks like a
+// shelf rather than a list and a product keeps its identity between loads.
+function artFor(id, title) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  const glyph = /sleep/i.test(title) ? '\u{1F319}' : /focus/i.test(title) ? '\u{26A1}'
+              : /recovery/i.test(title) ? '\u{1F331}' : /trial|starter/i.test(title) ? '\u{1F9EA}'
+              : '\u{1F9EC}';
+  return {glyph, bg: `radial-gradient(120% 140% at 20% 0%, hsla(${hue},70%,62%,.20), transparent 60%), `
+                   + `radial-gradient(100% 120% at 100% 100%, hsla(${(hue + 48) % 360},70%,60%,.14), transparent 55%), var(--bg)`};
+}
+
 async function loadProducts() {
   const items = await fetch('/api/stock/levels').then(r => r.json()).catch(() => []);
-  if (!items.length) { $('#products').innerHTML = '<span class="sub">the catalogue is empty</span>'; return; }
-  $('#products').innerHTML = items.map(p => `
+  const el = $('#products');
+  if (!items.length) { el.innerHTML = '<div class="muted">the catalogue is empty</div>'; return; }
+  el.innerHTML = items.map(p => {
+    const art = artFor(p.id, p.title);
+    const d = describe(p.title);
+    const chip = p.onHand <= 0 ? ['none', 'sold out']
+               : p.onHand < 20 ? ['low', p.onHand + ' left']
+               : ['', 'in stock'];
+    return `
     <div class="prod">
-      <h3>${p.title}</h3>
-      <div class="price">${money(p.price)}</div>
-      <div class="stockline">
-        <span class="pill">${p.onHand} on hand</span>
-        <span class="pill">${p.reserved} held</span>
-        <span class="pill">${p.sold} sold</span>
+      <div class="prod-art" style="background:${art.bg}">${art.glyph}
+        <span class="stock-chip ${chip[0]}">${chip[1]}</span>
       </div>
-      <button class="buy" data-v="${p.id}" ${p.onHand <= 0 ? 'disabled' : ''}>
-        ${p.onHand <= 0 ? 'Out of stock' : 'Buy one'}</button>
-    </div>`).join('');
+      <div class="prod-body">
+        <div class="prod-name">${d.name}</div>
+        <div class="prod-blurb">${d.blurb}</div>
+        <div class="prod-foot">
+          <span class="prod-val">${money(p.price)}</span>
+          <span class="prod-per">${d.per}</span>
+        </div>
+        <button class="buy" data-v="${p.id}" ${p.onHand <= 0 ? 'disabled' : ''}>
+          ${p.onHand <= 0 ? 'Sold out' : 'Buy one'}</button>
+      </div>
+    </div>`;
+  }).join('');
   document.querySelectorAll('button.buy[data-v]').forEach(b => b.onclick = () => buy(b.dataset.v, b));
+  $('#shopper').textContent = 'customer ' + CUSTOMER;
+}
+
+// Split "Recovery Stack · 30 day" into a name and the term, and give each line
+// a short description. Derived from the catalogue rather than invented per
+// product, so a new product needs no code.
+function describe(title) {
+  const parts = title.split('\u00b7').map(s => s.trim());
+  const name = parts[0];
+  const per = parts[1] ? parts[1] + ' supply' : 'one off';
+  const blurbs = {
+    focus: 'For the hours that need to count. Ships monthly, cancel whenever.',
+    sleep: 'Wind down properly. A month at a time, no commitment.',
+    recovery: 'For training weeks that ask a lot. Renews every 30 days.',
+    starter: 'A short trial, to see whether any of this suits you.',
+  };
+  const key = Object.keys(blurbs).find(k => new RegExp(k, 'i').test(title));
+  return {name, per, blurb: key ? blurbs[key] : 'A single item, shipped once.'};
 }
 
 async function buy(variant, btn) {
