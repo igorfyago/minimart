@@ -23,6 +23,20 @@ public final class Json {
         return b.toString();
     }
 
+    /** Build a flat object from alternating key, value pairs. Every value is
+     *  written as a string, including the numbers: an event payload is a
+     *  CONTRACT, and a reader that must guess whether "amount" arrives as
+     *  79 or 79.00 or "79.00" is a reader that will eventually guess wrong. */
+    public static String obj(String... kv) {
+        if (kv.length % 2 != 0) throw new IllegalArgumentException("obj() needs pairs");
+        StringBuilder b = new StringBuilder("{");
+        for (int i = 0; i < kv.length; i += 2) {
+            if (i > 0) b.append(',');
+            b.append('"').append(esc(kv[i])).append("\":\"").append(esc(kv[i + 1])).append('"');
+        }
+        return b.append('}').toString();
+    }
+
     public static String str(String json, String key) {
         String needle = "\"" + key + "\"";
         int i = json.indexOf(needle);
