@@ -35,8 +35,75 @@ public final class PayApi {
         s.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         s.createContext("/v1/payment_intents", PayApi::intents);
         s.createContext("/v1/balance", PayApi::balance);
+        s.createContext("/v1/list", PayApi::list);
+        s.createContext("/v1/keys", PayApi::keys);
+        s.createContext("/", PayApi::staticFile);
         s.start();
         return s;
+    }
+
+    private static void staticFile(HttpExchange ex) throws IOException {
+        String path = ex.getRequestURI().getPath();
+        if (path == null || path.equals("/") || path.isEmpty()) path = "/pay.html";
+        try (var in = PayApi.class.getResourceAsStream("/web" + path)) {
+            if (in == null) { send(ex, 404, err("not found")); return; }
+            byte[] b = in.readAllBytes();
+            ex.getResponseHeaders().set("Content-Type",
+                    path.endsWith(".css") ? "text/css" : "text/html; charset=utf-8");
+            ex.sendResponseHeaders(200, b.length);
+            ex.getResponseBody().write(b);
+            ex.close();
+        }
+    }
+
+    /** Recent payment intents, for the console. */
+    private static void list(HttpExchange ex) throws IOException {
+        try (Connection c = PayDb.open();
+             var ps = c.prepareStatement("""
+                     SELECT id, amount, currency, customer_ref, merchant_ref, status, business_at
+                     FROM payment_intents ORDER BY business_at DESC, id LIMIT 25""");
+             var rs = ps.executeQuery()) {
+            StringBuilder b = new StringBuilder("[");
+            boolean first = true;
+            while (rs.next()) {
+                if (!first) b.append(',');
+                first = false;
+                b.append("{\"id\":\"").append(Json.esc(rs.getString(1)))
+                 .append("\",\"amount\":\"").append(PaymentIntents.money(rs.getBigDecimal(2)))
+                 .append("\",\"currency\":\"").append(Json.esc(rs.getString(3)))
+                 .append("\",\"customer\":\"").append(Json.esc(rs.getString(4)))
+                 .append("\",\"merchant\":\"").append(Json.esc(rs.getString(5)))
+                 .append("\",\"status\":\"").append(rs.getString(6))
+                 .append("\",\"at\":\"").append(rs.getTimestamp(7).toInstant()).append("\"}");
+            }
+            send(ex, 200, b.append(']').toString());
+        } catch (Exception e) {
+            send(ex, 500, err(String.valueOf(e.getMessage())));
+        }
+    }
+
+    /** The idempotency ledger itself: which keys were seen, and what they returned. */
+    private static void keys(HttpExchange ex) throws IOException {
+        try (Connection c = PayDb.open();
+             var ps = c.prepareStatement("""
+                     SELECT key, state, status_code, substr(fingerprint, 1, 12), created_at
+                     FROM idempotency_keys ORDER BY created_at DESC LIMIT 20""");
+             var rs = ps.executeQuery()) {
+            StringBuilder b = new StringBuilder("[");
+            boolean first = true;
+            while (rs.next()) {
+                if (!first) b.append(',');
+                first = false;
+                b.append("{\"key\":\"").append(Json.esc(rs.getString(1)))
+                 .append("\",\"state\":\"").append(rs.getString(2))
+                 .append("\",\"status\":").append(rs.getInt(3))
+                 .append(",\"fingerprint\":\"").append(Json.esc(rs.getString(4)))
+                 .append("\",\"at\":\"").append(rs.getTimestamp(5).toInstant()).append("\"}");
+            }
+            send(ex, 200, b.append(']').toString());
+        } catch (Exception e) {
+            send(ex, 500, err(String.valueOf(e.getMessage())));
+        }
     }
 
     private static void intents(HttpExchange ex) throws IOException {

@@ -25,7 +25,7 @@ public final class Main {
         int martPort = Integer.parseInt(System.getenv().getOrDefault("MINIMART_PORT", "8081"));
         int payPort = Integer.parseInt(System.getenv().getOrDefault("MINIPAY_PORT", "8082"));
 
-        Migrate.run();
+        Migrate.bootstrap();
         PayDb.bootstrap();
         seedDemoCatalog();
 

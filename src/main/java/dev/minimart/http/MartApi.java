@@ -41,9 +41,177 @@ public final class MartApi {
         s.createContext("/api/orders", MartApi::orders);
         s.createContext("/api/stock", MartApi::stock);
         s.createContext("/api/sim/tick", MartApi::tick);
+        s.createContext("/api/sim/run", MartApi::simRun);
+        s.createContext("/api/sim/status", MartApi::simStatus);
         s.createContext("/api/audit", MartApi::audit);
+        s.createContext("/api/stats", MartApi::stats);
+        s.createContext("/api/orders/recent", MartApi::recentOrders);
+        s.createContext("/api/stock/levels", MartApi::stockLevels);
+        s.createContext("/api/subscriptions", MartApi::subscriptions);
+        s.createContext("/", MartApi::staticFile);
         s.start();
         return s;
+    }
+
+    // ------------------------------------------------------------ the shop UI
+
+    private static void staticFile(HttpExchange ex) throws IOException {
+        String path = ex.getRequestURI().getPath();
+        if (path == null || path.equals("/") || path.isEmpty()) path = "/index.html";
+        String type = path.endsWith(".css") ? "text/css" : path.endsWith(".js") ? "application/javascript"
+                : path.endsWith(".svg") ? "image/svg+xml" : "text/html; charset=utf-8";
+        try (var in = MartApi.class.getResourceAsStream("/web" + path)) {
+            if (in == null) { send(ex, 404, "{\"error\":\"not found\"}"); return; }
+            byte[] b = in.readAllBytes();
+            ex.getResponseHeaders().set("Content-Type", type);
+            ex.sendResponseHeaders(200, b.length);
+            ex.getResponseBody().write(b);
+            ex.close();
+        }
+    }
+
+    /** Headline numbers for the operations view. */
+    private static void stats(HttpExchange ex) throws IOException {
+        try (Connection c = Db.open()) {
+            long orders = one(c, "SELECT COUNT(*) FROM orders");
+            long shipped = one(c, "SELECT COUNT(*) FROM orders WHERE state = 'fulfilled'");
+            long reserved = one(c, "SELECT COUNT(*) FROM orders WHERE state = 'reserved'");
+            long aborted = one(c, "SELECT COUNT(*) FROM orders WHERE state = 'aborted'");
+            long subs = one(c, "SELECT COUNT(*) FROM subscriptions WHERE status = 'active'");
+            long invoices = one(c, "SELECT COUNT(*) FROM invoices WHERE status = 'paid'");
+            String revenue;
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT COALESCE(SUM(amount),0) FROM orders WHERE state = 'fulfilled'");
+                 ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                revenue = rs.getBigDecimal(1).stripTrailingZeros().toPlainString();
+            }
+            send(ex, 200, "{\"orders\":" + orders + ",\"shipped\":" + shipped + ",\"reserved\":" + reserved +
+                    ",\"aborted\":" + aborted + ",\"subscriptions\":" + subs + ",\"invoices\":" + invoices +
+                    ",\"revenue\":\"" + revenue + "\"}");
+        } catch (Exception e) { send(ex, 500, err(e)); }
+    }
+
+    private static void recentOrders(HttpExchange ex) throws IOException {
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement("""
+                     SELECT o.id, o.customer_id, o.variant_id, o.qty, o.amount, o.state, o.payment_mode,
+                            o.business_at, v.title
+                     FROM orders o JOIN variants v ON v.id = o.variant_id
+                     ORDER BY o.business_at DESC, o.id LIMIT 25""");
+             ResultSet rs = ps.executeQuery()) {
+            StringBuilder b = new StringBuilder("[");
+            boolean first = true;
+            while (rs.next()) {
+                if (!first) b.append(',');
+                first = false;
+                b.append("{\"id\":\"").append(rs.getString(1))
+                 .append("\",\"customer\":").append(rs.getLong(2))
+                 .append(",\"variant\":\"").append(Json.esc(rs.getString(3)))
+                 .append("\",\"qty\":").append(rs.getLong(4))
+                 .append(",\"amount\":\"").append(rs.getBigDecimal(5).stripTrailingZeros().toPlainString())
+                 .append("\",\"state\":\"").append(rs.getString(6))
+                 .append("\",\"mode\":\"").append(rs.getString(7))
+                 .append("\",\"at\":\"").append(rs.getTimestamp(8).toInstant())
+                 .append("\",\"title\":\"").append(Json.esc(rs.getString(9))).append("\"}");
+            }
+            send(ex, 200, b.append(']').toString());
+        } catch (Exception e) { send(ex, 500, err(e)); }
+    }
+
+    private static void stockLevels(HttpExchange ex) throws IOException {
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement("SELECT id, title, price FROM variants ORDER BY id");
+             ResultSet rs = ps.executeQuery()) {
+            StringBuilder b = new StringBuilder("[");
+            boolean first = true;
+            while (rs.next()) {
+                String v = rs.getString(1);
+                if (!first) b.append(',');
+                first = false;
+                b.append("{\"id\":\"").append(Json.esc(v))
+                 .append("\",\"title\":\"").append(Json.esc(rs.getString(2)))
+                 .append("\",\"price\":\"").append(rs.getBigDecimal(3).stripTrailingZeros().toPlainString())
+                 .append("\",\"onHand\":").append(bal(c, Orders.onHand("MAD", v)))
+                 .append(",\"reserved\":").append(bal(c, Orders.reserved("MAD", v)))
+                 .append(",\"sold\":").append(bal(c, Orders.sold("MAD", v))).append('}');
+            }
+            send(ex, 200, b.append(']').toString());
+        } catch (Exception e) { send(ex, 500, err(e)); }
+    }
+
+    private static void subscriptions(HttpExchange ex) throws IOException {
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement("""
+                     SELECT s.id, s.customer_id, s.variant_id, s.status, s.period_index, s.next_renewal_at,
+                            (SELECT COUNT(*) FROM invoices i WHERE i.subscription_id = s.id AND i.status='paid')
+                     FROM subscriptions s ORDER BY s.business_at DESC LIMIT 20""");
+             ResultSet rs = ps.executeQuery()) {
+            StringBuilder b = new StringBuilder("[");
+            boolean first = true;
+            while (rs.next()) {
+                if (!first) b.append(',');
+                first = false;
+                b.append("{\"id\":\"").append(rs.getString(1))
+                 .append("\",\"customer\":").append(rs.getLong(2))
+                 .append(",\"variant\":\"").append(Json.esc(rs.getString(3)))
+                 .append("\",\"status\":\"").append(rs.getString(4))
+                 .append("\",\"period\":").append(rs.getInt(5))
+                 .append(",\"nextRenewal\":\"").append(rs.getTimestamp(6).toInstant())
+                 .append("\",\"paid\":").append(rs.getLong(7)).append('}');
+            }
+            send(ex, 200, b.append(']').toString());
+        } catch (Exception e) { send(ex, 500, err(e)); }
+    }
+
+    // -------------------------------------------------------- the simulation
+
+    private static final java.util.concurrent.atomic.AtomicReference<String> SIM_STATE =
+            new java.util.concurrent.atomic.AtomicReference<>("{\"running\":false,\"message\":\"idle\"}");
+
+    /** Launch a population in the background so the page can watch it shop. */
+    private static void simRun(HttpExchange ex) throws IOException {
+        try {
+            String body = read(ex);
+            int agents = intOr(Json.str(body, "agents"), 25);
+            int ticks = intOr(Json.str(body, "ticks"), 24);
+            if (SIM_STATE.get().contains("\"running\":true")) {
+                send(ex, 409, "{\"error\":\"a run is already in progress\"}"); return;
+            }
+            int port = ex.getLocalAddress().getPort();
+            SIM_STATE.set("{\"running\":true,\"message\":\"starting " + agents + " agents\"}");
+            Thread.ofVirtual().start(() -> {
+                try {
+                    var sim = new dev.minimart.sim.SimRunner("http://localhost:" + port);
+                    var r = sim.run("web-" + System.nanoTime(), agents, ticks, "helix", "MAD",
+                            java.time.Instant.now(), java.time.Duration.ofHours(1));
+                    SIM_STATE.set("{\"running\":false,\"message\":\"done\",\"agents\":" + agents +
+                            ",\"ticks\":" + ticks + ",\"placed\":" + r.placed() + ",\"shipped\":" + r.shipped() +
+                            ",\"released\":" + r.released() + "}");
+                } catch (Exception e) {
+                    SIM_STATE.set("{\"running\":false,\"message\":\"failed: " +
+                            Json.esc(String.valueOf(e.getMessage())) + "\"}");
+                }
+            });
+            send(ex, 200, "{\"started\":true}");
+        } catch (Exception e) { send(ex, 500, err(e)); }
+    }
+
+    private static void simStatus(HttpExchange ex) throws IOException { send(ex, 200, SIM_STATE.get()); }
+
+    private static int intOr(String s, int fallback) {
+        try { return s == null ? fallback : Math.min(200, Math.max(1, Integer.parseInt(s))); }
+        catch (Exception e) { return fallback; }
+    }
+
+    private static long bal(Connection c, String ref) {
+        try { return Ledger.balance(c, ref).longValue(); } catch (Exception e) { return 0; }
+    }
+
+    private static long one(Connection c, String sql) throws Exception {
+        try (PreparedStatement ps = c.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
+            rs.next(); return rs.getLong(1);
+        }
     }
 
     private static void catalog(HttpExchange ex) throws IOException {

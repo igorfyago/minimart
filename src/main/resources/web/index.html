@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minimart · a shop with a simulated economy</title>
+<style>
+  :root {
+    --bg:#0a0d13; --card:#111722; --line:#1e2836; --text:#e6edf3; --dim:#8b98a9;
+    --accent:#58a6ff; --green:#31e981; --violet:#a78bff; --amber:#f5b43c; --red:#ff6b81;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  a { color:var(--accent); }
+  header { display:flex; align-items:center; gap:14px; padding:16px 22px;
+    border-bottom:1px solid var(--line); position:sticky; top:0; background:rgba(10,13,19,.94);
+    backdrop-filter:blur(10px); z-index:20; flex-wrap:wrap; }
+  h1 { font-size:19px; margin:0; font-weight:750; letter-spacing:-.01em; }
+  h1 span { color:var(--accent); }
+  .tag { color:var(--dim); font-size:12.5px; }
+  nav { margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; }
+  .tab { background:none; border:1px solid var(--line); color:var(--dim); padding:6px 13px;
+    border-radius:999px; cursor:pointer; font-size:12.5px; font-family:inherit; }
+  .tab.on { background:var(--accent); border-color:var(--accent); color:#04101f; font-weight:650; }
+  main { padding:22px; max-width:1240px; margin:0 auto; }
+  section.hidden { display:none; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 4px; font-weight:700; }
+  .sub { color:var(--dim); font-size:12.5px; margin-bottom:14px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(250px,100%),1fr)); gap:12px; }
+  .prod { background:#0b0f16; border:1px solid var(--line); border-radius:12px; padding:15px 16px;
+    display:flex; flex-direction:column; }
+  .prod h3 { margin:0; font-size:15px; }
+  .price { font-size:24px; font-weight:750; color:var(--green); margin:8px 0 2px; font-variant-numeric:tabular-nums; }
+  .stockline { font-size:11.5px; color:var(--dim); margin-bottom:12px; }
+  .pill { display:inline-block; font-size:10px; padding:2px 7px; border-radius:999px; margin-right:5px;
+    border:1px solid var(--line); color:var(--dim); }
+  button.buy { margin-top:auto; background:var(--accent); border:none; color:#04101f; font-weight:700;
+    padding:9px 0; border-radius:9px; cursor:pointer; font-size:13.5px; font-family:inherit; }
+  button.buy:hover { filter:brightness(1.1); }
+  button.buy:disabled { background:#243044; color:var(--dim); cursor:not-allowed; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(160px,100%),1fr)); gap:12px; }
+  .stat { background:#0b0f16; border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  .stat .k { font-size:10.5px; color:var(--dim); text-transform:uppercase; letter-spacing:.07em; }
+  .stat .v { font-size:26px; font-weight:750; color:var(--green); font-variant-numeric:tabular-nums; line-height:1.2; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th { text-align:left; color:var(--dim); font-weight:600; font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.06em; padding:7px 10px; border-bottom:1px solid var(--line); }
+  td { padding:7px 10px; border-bottom:1px solid rgba(255,255,255,.04); font-variant-numeric:tabular-nums; }
+  .s-fulfilled { color:var(--green); } .s-reserved { color:var(--amber); } .s-aborted { color:var(--dim); }
+  .mono { font-family:'Cascadia Code', Consolas, monospace; font-size:11.5px; color:var(--dim); }
+  .ok { color:var(--green); } .bad { color:var(--red); }
+  .audit { display:flex; gap:16px; flex-wrap:wrap; align-items:center; font-size:12.5px; }
+  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:6px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  input[type=number] { background:#0b0f16; border:1px solid var(--line); color:var(--text);
+    border-radius:8px; padding:7px 10px; width:90px; font-family:inherit; }
+  label { font-size:12.5px; color:var(--dim); }
+  .note { font-size:12px; color:var(--dim); border-left:2px solid var(--line); padding-left:12px; margin-top:14px; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#0b0f16;
+    border:1px solid var(--accent); border-radius:10px; padding:11px 18px; font-size:13px;
+    opacity:0; transition:opacity .25s; pointer-events:none; z-index:50; }
+  .toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mini<span>mart</span></h1>
+  <span class="tag">a working shop whose customers are software</span>
+  <nav>
+    <button class="tab on" data-tab="shop">Shop</button>
+    <button class="tab" data-tab="ops">Operations</button>
+    <button class="tab" data-tab="sim">The customers</button>
+    <a class="tab" href="https://pay.b4rruf3t.com" target="_blank">minipay ↗</a>
+  </nav>
+</header>
+
+<main>
+  <!-- ================= SHOP ================= -->
+  <section id="shop">
+    <div class="card">
+      <h2>The storefront</h2>
+      <div class="sub">Every purchase here is real inside this system: it reserves stock in one database and
+        authorises money in another, over HTTP, then captures on shipment. No money you own is ever involved.</div>
+      <div class="grid" id="products"><span class="sub">loading the catalogue…</span></div>
+      <div class="note">Stock is a second double-entry ledger. A stock account's currency is
+        <code>UNIT:{product}</code>, so "you cannot oversell" and "you cannot overdraw" are the same rule, checked
+        once under a row lock. Overselling is not defended against here, it is impossible to express.</div>
+    </div>
+  </section>
+
+  <!-- ================= OPERATIONS ================= -->
+  <section id="ops" class="hidden">
+    <div class="card">
+      <h2>Live operations</h2>
+      <div class="sub">Read straight from the running system, every 3 seconds.</div>
+      <div class="stats" id="stats"></div>
+      <div class="audit" style="margin-top:16px" id="audits"></div>
+      <div class="note">Three audits run continuously. Sum-zero says every transaction balances per currency.
+        Drift says every cached balance still equals the sum of its entries. The third says the pooled reserved
+        stock equals the units actually held by live reservations, and it is the only one that can catch a
+        reservation being settled twice: the other two stay green while the warehouse goes wrong.</div>
+    </div>
+
+    <div class="card">
+      <h2>Inventory</h2>
+      <div class="sub">On hand, held by live reservations, and sold. These three always sum to what was received.</div>
+      <table id="stock"><tbody></tbody></table>
+    </div>
+
+    <div class="card">
+      <h2>Recent orders</h2>
+      <div class="sub">Every order carries the id of a PaymentIntent living in the other service.</div>
+      <table id="orders"><tbody></tbody></table>
+    </div>
+
+    <div class="card">
+      <h2>Subscriptions</h2>
+      <div class="sub">A renewal is not a special case here, it is an order with a derived id, so it inherits the
+        same reservation, authorisation and idempotency machinery.</div>
+      <table id="subs"><tbody></tbody></table>
+    </div>
+  </section>
+
+  <!-- ================= SIMULATION ================= -->
+  <section id="sim" class="hidden">
+    <div class="card">
+      <h2>The customers are agents</h2>
+      <div class="sub">This shop has no human customers, so the customers were built too. A seeded population
+        browses the catalogue, buys, abandons carts and comes back, driving the same public API a browser would.</div>
+      <div class="row">
+        <label>agents <input type="number" id="agents" value="25" min="1" max="200"></label>
+        <label>ticks <input type="number" id="ticks" value="24" min="1" max="200"></label>
+        <button class="buy" style="width:auto;padding:9px 20px" id="run">Run a population</button>
+        <span id="simmsg" class="sub" style="margin:0"></span>
+      </div>
+      <div class="note">Every choice is a pure function of (run, agent, tick, step), so the same seed produces the
+        same week twice even though agents run concurrently. Order ids are derived rather than random, which is why
+        replaying a window creates nothing new instead of duplicating orders. One tick of business time is one
+        hour, so a run of 24 ticks lives a compressed day in a few seconds.</div>
+      <div class="note"><b>What this honestly proves:</b> that the platform holds up under concurrent traffic and
+        that its invariants survive. <b>What it does not prove:</b> real conversion rates. These agents were
+        authored, so they are a load and logic oracle, not a forecast.</div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const money = v => '€' + Number(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+const uuid = () => crypto.randomUUID();
+let CUSTOMER = 7000 + Math.floor(Math.random() * 2000);
+
+document.querySelectorAll('.tab[data-tab]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tab[data-tab]').forEach(x => x.classList.toggle('on', x === b));
+  ['shop','ops','sim'].forEach(id => $('#' + id).classList.toggle('hidden', id !== b.dataset.tab));
+});
+
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+async function loadProducts() {
+  const items = await fetch('/api/stock/levels').then(r => r.json()).catch(() => []);
+  if (!items.length) { $('#products').innerHTML = '<span class="sub">the catalogue is empty</span>'; return; }
+  $('#products').innerHTML = items.map(p => `
+    <div class="prod">
+      <h3>${p.title}</h3>
+      <div class="price">${money(p.price)}</div>
+      <div class="stockline">
+        <span class="pill">${p.onHand} on hand</span>
+        <span class="pill">${p.reserved} held</span>
+        <span class="pill">${p.sold} sold</span>
+      </div>
+      <button class="buy" data-v="${p.id}" ${p.onHand <= 0 ? 'disabled' : ''}>
+        ${p.onHand <= 0 ? 'Out of stock' : 'Buy one'}</button>
+    </div>`).join('');
+  document.querySelectorAll('button.buy[data-v]').forEach(b => b.onclick = () => buy(b.dataset.v, b));
+}
+
+async function buy(variant, btn) {
+  btn.disabled = true; btn.textContent = 'Reserving…';
+  const orderId = uuid();
+  try {
+    const r = await fetch('/api/checkout', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({orderId, tenant: 'helix', customer: String(CUSTOMER), variant, location: 'MAD', qty: 1})
+    }).then(r => r.json());
+    if (r.error) { toast('Declined: ' + r.error); }
+    else {
+      btn.textContent = 'Shipping…';
+      await fetch('/api/orders/' + orderId + '/ship', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+      toast('Bought and shipped. Money captured at the processor.');
+    }
+  } catch (e) { toast('Something went wrong: ' + e.message); }
+  loadProducts();
+}
+
+async function loadOps() {
+  if ($('#ops').classList.contains('hidden')) return;
+  try {
+    const s = await fetch('/api/stats').then(r => r.json());
+    $('#stats').innerHTML = [
+      ['Revenue captured', money(s.revenue)], ['Orders', s.orders], ['Shipped', s.shipped],
+      ['Reserved now', s.reserved], ['Released', s.aborted],
+      ['Active subs', s.subscriptions], ['Paid invoices', s.invoices]
+    ].map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+    const a = await fetch('/api/audit').then(r => r.json());
+    const row = (label, n) => `<span><span class="dot" style="background:${n === 0 ? 'var(--green)' : 'var(--red)'}"></span>${label}: <b class="${n === 0 ? 'ok' : 'bad'}">${n}</b></span>`;
+    $('#audits').innerHTML = row('sum-zero violations', a.sum_zero_violations)
+      + row('drifted balances', a.drifted_accounts) + row('reserved mismatches', a.reserved_mismatches)
+      + `<span style="color:${a.healthy ? 'var(--green)' : 'var(--red)'}">${a.healthy ? 'the books are honest' : 'INVESTIGATE'}</span>`;
+
+    const st = await fetch('/api/stock/levels').then(r => r.json());
+    $('#stock').innerHTML = '<thead><tr><th>Product</th><th>On hand</th><th>Held</th><th>Sold</th><th>Total</th></tr></thead><tbody>'
+      + st.map(p => `<tr><td>${p.title}</td><td>${p.onHand}</td><td>${p.reserved}</td><td>${p.sold}</td>
+          <td class="mono">${p.onHand + p.reserved + p.sold}</td></tr>`).join('') + '</tbody>';
+
+    const o = await fetch('/api/orders/recent').then(r => r.json());
+    $('#orders').innerHTML = '<thead><tr><th>Order</th><th>Customer</th><th>Product</th><th>Qty</th><th>Amount</th><th>State</th><th>Paid via</th></tr></thead><tbody>'
+      + (o.length ? o.map(x => `<tr><td class="mono">${x.id.slice(0,8)}</td><td>${x.customer}</td>
+          <td>${x.title}</td><td>${x.qty}</td><td>${money(x.amount)}</td>
+          <td class="s-${x.state}">${x.state}</td><td class="mono">${x.mode}</td></tr>`).join('')
+        : '<tr><td colspan="7" class="sub">no orders yet</td></tr>') + '</tbody>';
+
+    const su = await fetch('/api/subscriptions').then(r => r.json());
+    $('#subs').innerHTML = '<thead><tr><th>Customer</th><th>Plan</th><th>Status</th><th>Periods paid</th><th>Next renewal</th></tr></thead><tbody>'
+      + (su.length ? su.map(x => `<tr><td>${x.customer}</td><td>${x.variant}</td>
+          <td class="s-${x.status === 'active' ? 'fulfilled' : 'aborted'}">${x.status}</td><td>${x.paid}</td>
+          <td class="mono">${x.nextRenewal.slice(0,10)}</td></tr>`).join('')
+        : '<tr><td colspan="5" class="sub">no subscriptions yet</td></tr>') + '</tbody>';
+  } catch (e) { /* transient, the next poll retries */ }
+}
+
+$('#run').onclick = async () => {
+  const agents = $('#agents').value, ticks = $('#ticks').value;
+  $('#run').disabled = true; $('#simmsg').textContent = 'starting…';
+  await fetch('/api/sim/run', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({agents, ticks})});
+  const poll = setInterval(async () => {
+    const s = await fetch('/api/sim/status').then(r => r.json()).catch(() => null);
+    if (!s) return;
+    if (s.running) { $('#simmsg').textContent = s.message; return; }
+    clearInterval(poll);
+    $('#run').disabled = false;
+    $('#simmsg').textContent = s.placed !== undefined
+      ? `${s.agents} agents over ${s.ticks} ticks · ${s.placed} orders placed, ${s.shipped} shipped, ${s.released} abandoned carts reclaimed`
+      : s.message;
+    loadProducts(); loadOps();
+  }, 1500);
+};
+
+loadProducts();
+loadOps();
+setInterval(loadOps, 3000);
+</script>
+</body>
+</html>

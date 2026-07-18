@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minipay · a small payment processor</title>
+<style>
+  :root { --bg:#0a0d13; --card:#111722; --line:#1e2836; --text:#e6edf3; --dim:#8b98a9;
+    --accent:#a78bff; --green:#31e981; --amber:#f5b43c; --red:#ff6b81; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  a { color:var(--accent); }
+  header { display:flex; align-items:center; gap:14px; padding:16px 22px; border-bottom:1px solid var(--line);
+    position:sticky; top:0; background:rgba(10,13,19,.94); backdrop-filter:blur(10px); flex-wrap:wrap; }
+  h1 { font-size:19px; margin:0; font-weight:750; }
+  h1 span { color:var(--accent); }
+  .tag { color:var(--dim); font-size:12.5px; }
+  nav { margin-left:auto; }
+  .tab { background:none; border:1px solid var(--line); color:var(--dim); padding:6px 13px;
+    border-radius:999px; font-size:12.5px; text-decoration:none; }
+  main { padding:22px; max-width:1120px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 4px; font-weight:700; }
+  .sub { color:var(--dim); font-size:12.5px; margin-bottom:14px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(190px,100%),1fr)); gap:12px; }
+  .stat { background:#0b0f16; border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  .stat .k { font-size:10.5px; color:var(--dim); text-transform:uppercase; letter-spacing:.07em; }
+  .stat .v { font-size:26px; font-weight:750; color:var(--green); font-variant-numeric:tabular-nums; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th { text-align:left; color:var(--dim); font-weight:600; font-size:10.5px; text-transform:uppercase;
+    letter-spacing:.06em; padding:7px 10px; border-bottom:1px solid var(--line); }
+  td { padding:7px 10px; border-bottom:1px solid rgba(255,255,255,.04); font-variant-numeric:tabular-nums; }
+  .mono { font-family:'Cascadia Code', Consolas, monospace; font-size:11.5px; }
+  .st-succeeded { color:var(--green); } .st-requires_capture { color:var(--amber); } .st-canceled { color:var(--dim); }
+  button { background:var(--accent); border:none; color:#100a24; font-weight:700; padding:9px 18px;
+    border-radius:9px; cursor:pointer; font-size:13.5px; font-family:inherit; }
+  button:hover { filter:brightness(1.1); }
+  pre { background:#0b0f16; border:1px solid var(--line); border-radius:10px; padding:12px 14px;
+    font:11.5px/1.6 'Cascadia Code', Consolas, monospace; overflow-x:auto; margin:8px 0 0; color:#a5d6ff; }
+  .note { font-size:12px; color:var(--dim); border-left:2px solid var(--line); padding-left:12px; margin-top:14px; }
+  .demo-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width:760px) { .demo-grid { grid-template-columns:1fr; } }
+  .verdict { font-size:13px; margin-top:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mini<span>pay</span></h1>
+  <span class="tag">authorize, capture, void · and an idempotency layer that means it</span>
+  <nav><a class="tab" href="https://mart.b4rruf3t.com" target="_blank">the shop it serves ↗</a></nav>
+</header>
+
+<main>
+  <div class="card">
+    <h2>What this is</h2>
+    <div class="sub">A small payment processor, shaped like Stripe. It holds its own ledger in its own database and
+      is reachable only over HTTP, because the network between a merchant and its processor is the entire reason
+      idempotency keys and retries exist.</div>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="card">
+    <h2>The idempotency layer, live</h2>
+    <div class="sub">Send the same request twice with the same key. A processor that merely refuses the second one
+      is not enough: the caller lost the first response, so it needs the <b>same answer again</b>.</div>
+    <button id="demo">Send one request twice with the same key</button>
+    <div class="demo-grid" style="margin-top:12px">
+      <div><div class="sub" style="margin:0">first call</div><pre id="r1">not run yet</pre></div>
+      <div><div class="sub" style="margin:0">retry, same key</div><pre id="r2">not run yet</pre></div>
+    </div>
+    <div class="verdict" id="verdict"></div>
+    <div class="note">Three cases, and the difference between them is the point. Same key and same request returns
+      the byte-identical response. Same key with a <i>different</i> request returns 422, because that is a caller
+      bug and silently doing either thing would be worse. Same key while the first is still running returns 409.</div>
+  </div>
+
+  <div class="card">
+    <h2>Payment intents</h2>
+    <div class="sub">Authorised money is held, not earned. It becomes the merchant's only on capture, and goes
+      back to the customer on cancel.</div>
+    <table id="intents"><tbody></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>Idempotency keys seen</h2>
+    <div class="sub">The processor's own record of every key, its request fingerprint, and the status it returned.</div>
+    <table id="keys"><tbody></tbody></table>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+
+async function load() {
+  try {
+    const intents = await fetch('/v1/list').then(r => r.json());
+    const bal = await fetch('/v1/balance?merchant=helix').then(r => r.json());
+    const held = intents.filter(i => i.status === 'requires_capture').length;
+    const done = intents.filter(i => i.status === 'succeeded').length;
+    $('#stats').innerHTML = [
+      ['Available to merchant', '€' + bal.available], ['Held (authorised)', '€' + bal.pending],
+      ['Captured intents', done], ['Awaiting capture', held]
+    ].map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+    $('#intents').innerHTML = '<thead><tr><th>Intent</th><th>Customer</th><th>Merchant</th><th>Amount</th><th>Status</th></tr></thead><tbody>'
+      + (intents.length ? intents.map(i => `<tr><td class="mono">${i.id.slice(0,22)}</td>
+          <td class="mono">${i.customer}</td><td>${i.merchant}</td><td>€${i.amount}</td>
+          <td class="st-${i.status}">${i.status}</td></tr>`).join('')
+        : '<tr><td colspan="5" class="sub">no payments yet</td></tr>') + '</tbody>';
+
+    const keys = await fetch('/v1/keys').then(r => r.json());
+    $('#keys').innerHTML = '<thead><tr><th>Key</th><th>State</th><th>Returned</th><th>Request fingerprint</th></tr></thead><tbody>'
+      + (keys.length ? keys.map(k => `<tr><td class="mono">${k.key}</td><td>${k.state}</td>
+          <td class="mono">${k.status}</td><td class="mono">${k.fingerprint}…</td></tr>`).join('')
+        : '<tr><td colspan="4" class="sub">no keys yet</td></tr>') + '</tbody>';
+  } catch (e) { /* the next poll retries */ }
+}
+
+$('#demo').onclick = async () => {
+  const key = 'demo-' + Math.random().toString(36).slice(2, 10);
+  const body = JSON.stringify({
+    id: 'pi_demo_' + Math.random().toString(36).slice(2, 8),
+    amount: '42.00', customer: 'cust_demo', merchant: 'helix'
+  });
+  const call = () => fetch('/v1/payment_intents', {
+    method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': key}, body
+  }).then(async r => ({status: r.status, replay: r.headers.get('Idempotent-Replayed'), text: await r.text()}));
+
+  $('#r1').textContent = 'sending…'; $('#r2').textContent = '';
+  const a = await call();
+  $('#r1').textContent = 'HTTP ' + a.status + '\n' + a.text;
+  const b = await call();
+  $('#r2').textContent = 'HTTP ' + b.status + (b.replay ? '  (Idempotent-Replayed: true)' : '') + '\n' + b.text;
+  $('#verdict').innerHTML = a.text === b.text
+    ? '<span style="color:var(--green)">Identical response, and the customer was charged once. That is the whole feature.</span>'
+    : '<span style="color:var(--red)">The responses differ, which would be a bug.</span>';
+  load();
+};
+
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>
