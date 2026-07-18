@@ -35,6 +35,17 @@ public final class MartApi {
 
     private MartApi() {}
 
+    /**
+     * WHO IS CALLING. ANONYMOUS today — the estate rollout is permissive:
+     * tokens are recognized when present (this seam is where they'll be
+     * read) and nothing is ever rejected for lacking one. When sso-client
+     * becomes a resolvable artifact here, the adapter in CallerIdentity's
+     * javadoc replaces ANONYMOUS with the real check, and every endpoint
+     * below starts serving the token's customer over the request's claim
+     * without changing a line of their own.
+     */
+    static volatile CallerIdentity identity = CallerIdentity.ANONYMOUS;
+
     public static HttpServer start(int port) throws IOException {
         HttpServer s = HttpServer.create(new InetSocketAddress(port), 0);
         s.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
@@ -172,7 +183,9 @@ public final class MartApi {
         try {
             String body = read(ex);
             String tenant = Json.str(body, "tenant");
-            long customer = Long.parseLong(Json.str(body, "customer"));
+            long customer = CallerIdentity.resolve(identity,
+                    ex.getRequestHeaders().getFirst("Authorization"),
+                    Long.parseLong(Json.str(body, "customer")));
             String variant = Json.str(body, "variant");
             String location = Json.str(body, "location");
             String interval = Json.str(body, "interval_days");
@@ -219,6 +232,11 @@ public final class MartApi {
      */
     private static void subscriptions(HttpExchange ex) throws IOException {
         String customer = param(ex, "customer");
+        // identity beats the query string: a token naming A means ?customer=B
+        // is ignored, not obeyed. Today identity is ANONYMOUS, so the filter
+        // behaves exactly as it always has.
+        var identified = identity.customerFor(ex.getRequestHeaders().getFirst("Authorization"));
+        if (identified.isPresent()) customer = String.valueOf(identified.get());
         String sql = """
                      SELECT s.id, s.customer_id, s.variant_id, s.status, s.period_index, s.next_renewal_at,
                             (SELECT COUNT(*) FROM invoices i WHERE i.subscription_id = s.id AND i.status='paid')
@@ -332,7 +350,12 @@ public final class MartApi {
             if (orderId == null || tenant == null || customer == null || variant == null || qty == null) {
                 send(ex, 400, "{\"error\":\"need orderId, tenant, customer, variant, qty\"}"); return;
             }
-            Checkout.Result r = Checkout.place(UUID.fromString(orderId), tenant, Long.parseLong(customer),
+            // identity beats the body: a token naming A means a body naming B
+            // is ignored, not obeyed. Today identity is ANONYMOUS, so this
+            // resolves to the body's customer exactly as before.
+            long actingCustomer = CallerIdentity.resolve(identity,
+                ex.getRequestHeaders().getFirst("Authorization"), Long.parseLong(customer));
+            Checkout.Result r = Checkout.place(UUID.fromString(orderId), tenant, actingCustomer,
                     variant, location == null ? "MAD" : location, Long.parseLong(qty), businessAt(body));
             if (r instanceof Checkout.Placed p) {
                 send(ex, 200, "{\"orderId\":\"" + p.orderId() + "\",\"payment_intent\":\"" + p.paymentIntentId() +
