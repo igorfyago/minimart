@@ -43,7 +43,13 @@ public final class Billing {
     /** How long to wait before each retry of a failed payment, then give up. */
     static final int[] DUNNING_BACKOFF_DAYS = {1, 3, 7};
 
-    public record Report(int renewed, int failed, int recovered, int givenUp) {}
+    /** skipped counts periods this pass could not even attempt, because
+     *  something on OUR side was wrong. It is reported separately from failed
+     *  on purpose: failed means the customer's payment did not go through,
+     *  skipped means we did not manage to ask. Collapsing the two would make an
+     *  outage look like a collections problem, and the ladder would punish
+     *  customers for it. */
+    public record Report(int renewed, int failed, int recovered, int givenUp, int skipped) {}
 
     private Billing() {}
 
@@ -124,7 +130,7 @@ public final class Billing {
             }
         }
 
-        int renewed = 0, failed = 0, recovered = 0, givenUp = 0;
+        int renewed = 0, failed = 0, recovered = 0, givenUp = 0, skipped = 0;
         for (Due d : due) {
             // asked to stop at the end of the paid period, and the end is now
             if (d.cancelAtEnd()) {
@@ -151,6 +157,16 @@ public final class Billing {
             UUID orderId = derive("renew:" + d.id() + ':' + period);
             if (!claimPeriod(invoiceId, d.id(), period, orderId, now) && !retrying) continue;
 
+            // EACH SUBSCRIPTION IS ITS OWN FAILURE DOMAIN.
+            //
+            // Anything unexpected below is a fault on our side, not the
+            // customer's: a product never stocked at their location, a
+            // processor that is down, a connection that could not be had. It
+            // must cost this one renewal and nothing else. Without this, a
+            // single unfulfillable row ends the pass and every customer queued
+            // behind it goes unbilled, which is how one bad record becomes a
+            // day of lost revenue.
+            try {
             Checkout.Result r = Checkout.place(orderId, d.tenant(), d.customerId(),
                     d.variantId(), d.location(), 1, now);
 
@@ -204,8 +220,24 @@ public final class Billing {
                     c.commit();
                 } catch (SQLException | RuntimeException e) { c.rollback(); throw e; }
             }
+            } catch (SQLException | RuntimeException e) {
+                // Release the claim. The invoice row was inserted to reserve
+                // this period, and leaving it behind would make the next pass
+                // see the period as already taken and skip it forever, which
+                // turns a transient fault into a subscription that silently
+                // never bills again.
+                releaseClaim(invoiceId);
+                // NO dunning attempt and NO failed invoice. The customer's card
+                // was never asked, so nothing about this is their failure, and
+                // pushing them into the ladder would end with them cancelled
+                // for a warehouse mistake. The subscription stays due, and the
+                // next pass tries again once the cause is fixed.
+                System.err.println("billing: skipped subscription " + d.id() + " period " + period
+                        + ": " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                skipped++;
+            }
         }
-        return new Report(renewed, failed, recovered, givenUp);
+        return new Report(renewed, failed, recovered, givenUp, skipped);
     }
 
     public static void cancel(UUID subscriptionId, boolean atPeriodEnd, Instant now) throws SQLException {
@@ -259,6 +291,23 @@ public final class Billing {
             ps.setObject(1, invoiceId); ps.setObject(2, subId); ps.setInt(3, period);
             ps.setObject(4, orderId); ps.setTimestamp(5, java.sql.Timestamp.from(now));
             return ps.executeUpdate() == 1;
+        }
+    }
+
+    /** Undo a period claim that could not be attempted. Deleting is safe
+     *  precisely because the row is still pending: a claim that never became
+     *  an outcome carries no information worth keeping, and keeping it would
+     *  block the period forever. */
+    private static void releaseClaim(UUID invoiceId) {
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement(
+                     "DELETE FROM invoices WHERE id = ? AND status = 'pending'")) {
+            ps.setObject(1, invoiceId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            // the database is the thing that is unwell; the next pass will find
+            // the pending row and this is not the moment to make it worse
+            System.err.println("billing: could not release claim " + invoiceId + ": " + e.getMessage());
         }
     }
 

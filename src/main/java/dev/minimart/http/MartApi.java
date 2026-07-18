@@ -2,6 +2,7 @@ package dev.minimart.http;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import dev.minimart.commerce.Billing;
 import dev.minimart.commerce.Checkout;
 import dev.minimart.commerce.Orders;
 import dev.minimart.commerce.ReservationSweeper;
@@ -48,6 +49,8 @@ public final class MartApi {
         s.createContext("/api/orders/recent", MartApi::recentOrders);
         s.createContext("/api/stock/levels", MartApi::stockLevels);
         s.createContext("/api/subscriptions", MartApi::subscriptions);
+        s.createContext("/api/subscribe", MartApi::subscribe);
+        s.createContext("/api/unsubscribe", MartApi::unsubscribe);
         s.createContext("/", MartApi::staticFile);
         s.start();
         return s;
@@ -137,6 +140,38 @@ public final class MartApi {
                  .append(",\"sold\":").append(bal(c, Orders.sold("MAD", v))).append('}');
             }
             send(ex, 200, b.append(']').toString());
+        } catch (Exception e) { send(ex, 500, err(e)); }
+    }
+
+
+    /**
+     * Subscribing is a PUBLIC action, so the agent customers can do it through
+     * the same door a browser uses. There is no back channel into Billing for
+     * the simulation, which is the whole reason the simulation is worth
+     * anything: it exercises the endpoint that real traffic would hit.
+     */
+    private static void subscribe(HttpExchange ex) throws IOException {
+        try {
+            String body = read(ex);
+            String tenant = Json.str(body, "tenant");
+            long customer = Long.parseLong(Json.str(body, "customer"));
+            String variant = Json.str(body, "variant");
+            String location = Json.str(body, "location");
+            String interval = Json.str(body, "interval_days");
+            Instant at = businessAt(body);
+            UUID id = Billing.subscribe(tenant, customer, variant, location,
+                    interval == null ? 30 : Integer.parseInt(interval), at);
+            send(ex, 200, "{\"subscription\":\"" + id + "\",\"status\":\"active\"}");
+        } catch (Exception e) { send(ex, 500, err(e)); }
+    }
+
+    private static void unsubscribe(HttpExchange ex) throws IOException {
+        try {
+            String body = read(ex);
+            UUID id = UUID.fromString(Json.str(body, "subscription"));
+            boolean atPeriodEnd = "true".equals(Json.str(body, "at_period_end"));
+            Billing.cancel(id, atPeriodEnd, businessAt(body));
+            send(ex, 200, "{\"subscription\":\"" + id + "\",\"canceled\":true,\"at_period_end\":" + atPeriodEnd + "}");
         } catch (Exception e) { send(ex, 500, err(e)); }
     }
 
@@ -304,7 +339,16 @@ public final class MartApi {
         try {
             Instant at = businessAt(read(ex));
             int released = ReservationSweeper.sweepOnce(at, 500);
-            send(ex, 200, "{\"business_at\":\"" + at + "\",\"reservations_released\":" + released + "}");
+            // billing is time-driven too, so it belongs to the tick rather than
+            // to a background timer: the same pass, the same business instant,
+            // and a compressed run stays reproducible
+            Billing.Report r = Billing.renewOnce(at, 200);
+            send(ex, 200, "{\"business_at\":\"" + at + "\",\"reservations_released\":" + released
+                    + ",\"renewed\":" + r.renewed() + ",\"failed\":" + r.failed()
+                    + ",\"recovered\":" + r.recovered() + ",\"given_up\":" + r.givenUp()
+                    // reported, never swallowed: a skip means the system failed
+                    // somebody, and the only thing worse than that is not saying so
+                    + ",\"skipped\":" + r.skipped() + "}");
         } catch (Exception e) {
             send(ex, 500, err(e));
         }

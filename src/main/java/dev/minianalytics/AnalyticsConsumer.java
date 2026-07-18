@@ -38,12 +38,26 @@ public final class AnalyticsConsumer {
 
     private final KafkaConsumer<String, String> consumer;
 
-    public AnalyticsConsumer(String bootstrap, String topic) {
+    public AnalyticsConsumer(String bootstrap, String topic) { this(bootstrap, topic, GROUP, true); }
+
+    /**
+     * The group is a parameter so a second reader can consume the same topic
+     * without competing for partitions. Two consumers in ONE group SHARE the
+     * work, which is what makes a group scale horizontally, and is exactly the
+     * wrong thing when the second one expects to see everything.
+     *
+     * fromHistory chooses where a brand-new group starts. The production
+     * consumer wants the whole log, because a read model that begins at "now"
+     * is permanently missing everything that came before it. A reader that only
+     * cares what happens next wants the opposite, and on a long-lived topic the
+     * difference is minutes of replay against milliseconds.
+     */
+    public AnalyticsConsumer(String bootstrap, String topic, String group, boolean fromHistory) {
         Properties p = new Properties();
         p.put("bootstrap.servers", bootstrap);
-        p.put("group.id", GROUP);
+        p.put("group.id", group);
         p.put("enable.auto.commit", "false");   // we decide when an event is done
-        p.put("auto.offset.reset", "earliest"); // a new consumer reads history, not just the future
+        p.put("auto.offset.reset", fromHistory ? "earliest" : "latest");
         p.put("max.poll.records", "200");
         this.consumer = new KafkaConsumer<>(p, new StringDeserializer(), new StringDeserializer());
         this.consumer.subscribe(List.of(topic));

@@ -97,7 +97,7 @@ class OutboxLessonTest {
         assertEquals(1, sent);
         assertEquals(0, pendingCount(), "marked only once the broker acknowledged it");
         // and it really is on the topic, not merely marked
-        assertTrue(readTopic("minimart.orders.v1").stream().anyMatch(v -> v.contains(id.toString())),
+        assertTrue(topicContains("minimart.orders.v1", id.toString()),
                 "the event is genuinely on the broker");
 
         // a second pass has nothing to do: publishing is not repeated
@@ -135,7 +135,17 @@ class OutboxLessonTest {
              ResultSet rs = ps.executeQuery()) { rs.next(); return rs.getLong(1); }
     }
 
-    private static List<String> readTopic(String topic) {
+    /**
+     * Scan the topic for a value, from the beginning, until it is found or time
+     * runs out.
+     *
+     * The first version stopped at the first non-empty poll, which passed only
+     * while the topic was nearly empty. A log that has been running a while
+     * hands back the OLDEST batch first, so the event just written is several
+     * polls away, and the test began failing the moment the system it tests
+     * started being used. Reading a log means draining it, not glancing at it.
+     */
+    private static boolean topicContains(String topic, String needle) {
         Properties p = new Properties();
         p.put("bootstrap.servers", KAFKA);
         p.put("group.id", "lesson-reader-" + UUID.randomUUID());
@@ -143,18 +153,19 @@ class OutboxLessonTest {
         try (KafkaConsumer<String, String> c =
                      new KafkaConsumer<>(p, new StringDeserializer(), new StringDeserializer())) {
             var parts = c.partitionsFor(topic);
-            if (parts == null || parts.isEmpty()) return List.of();
+            if (parts == null || parts.isEmpty()) return false;
             var tps = parts.stream().map(i -> new TopicPartition(i.topic(), i.partition())).toList();
             c.assign(tps);
             c.seekToBeginning(tps);
-            List<String> out = new java.util.ArrayList<>();
-            long deadline = System.currentTimeMillis() + 5000;
-            while (System.currentTimeMillis() < deadline) {
-                ConsumerRecords<String, String> recs = c.poll(Duration.ofMillis(400));
-                recs.forEach(r -> out.add(r.value()));
-                if (!out.isEmpty()) break;
+            long deadline = System.currentTimeMillis() + 15_000;
+            int emptyPolls = 0;
+            while (System.currentTimeMillis() < deadline && emptyPolls < 5) {
+                ConsumerRecords<String, String> recs = c.poll(Duration.ofMillis(500));
+                if (recs.isEmpty()) { emptyPolls++; continue; }
+                emptyPolls = 0;
+                for (var r : recs) if (r.value() != null && r.value().contains(needle)) return true;
             }
-            return out;
+            return false;
         }
     }
 }

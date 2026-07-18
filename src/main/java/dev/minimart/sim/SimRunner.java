@@ -36,7 +36,8 @@ public final class SimRunner {
 
     /** A customer, derived entirely from the seed. */
     public record Persona(int id, BigDecimal budget, double buyPropensity,
-                          double shipPropensity, double priceSensitivity) {}
+                          double shipPropensity, double priceSensitivity,
+                          double subscribePropensity, double churnPropensity) {}
 
     public record Result(List<String> decisions, int placed, int rejected, int shipped, int released) {}
 
@@ -51,7 +52,13 @@ public final class SimRunner {
                 BigDecimal.valueOf(40 + Math.round(b * 260)),          // 40 to 300
                 0.15 + Seeds.unit(runId, agentId, 0, "buy") * 0.45,     // some shop often, some rarely
                 0.55 + Seeds.unit(runId, agentId, 0, "ship") * 0.45,    // some abandon their cart
-                0.6 + Seeds.unit(runId, agentId, 0, "price") * 0.6);
+                0.6 + Seeds.unit(runId, agentId, 0, "price") * 0.6,
+                // a minority ever commit to a subscription, and of those a
+                // smaller minority walk away again. Both are traits of the
+                // PERSON, fixed by the seed, not a coin flipped each tick,
+                // which is what makes a cohort mean anything across a run.
+                Seeds.unit(runId, agentId, 0, "subscribe") * 0.30,
+                Seeds.unit(runId, agentId, 0, "churn") * 0.08);
     }
 
     /**
@@ -122,6 +129,17 @@ public final class SimRunner {
                     log.add(key(tick, agentId) + "|too_expensive|" + v.id());
                 }
             }
+            // do they commit to a subscription this tick? Once only: a second
+            // subscribe to the same product returns the one they already have,
+            // so the endpoint is safe to call and the agent need not remember.
+            if (Seeds.unit(runId, agentId, tick, "sub") < p.subscribePropensity()) {
+                Variant v = catalog.get(Seeds.intIn(runId, agentId, tick, "subpick", catalog.size()));
+                String r = post("/api/subscribe", "{\"tenant\":\"" + tenant + "\",\"customer\":\""
+                        + (1000 + agentId) + "\",\"variant\":\"" + v.id() + "\",\"location\":\"" + location
+                        + "\",\"interval_days\":\"30\",\"business_at\":\"" + now + "\"}");
+                if (r.contains("\"status\":\"active\"")) log.add(key(tick, agentId) + "|subscribed|" + v.id());
+            }
+
             // and do they complete a previous purchase, or abandon it to expire?
             UUID mine = Seeds.uuid(runId, agentId, Math.max(0, tick - 1), "order");
             if (awaitingShip.remove(mine) && Seeds.unit(runId, agentId, tick, "ship") < p.shipPropensity()) {

@@ -62,6 +62,24 @@
     border:1px solid var(--accent); border-radius:10px; padding:11px 18px; font-size:13px;
     opacity:0; transition:opacity .25s; pointer-events:none; z-index:50; }
   .toast.show { opacity:1; }
+  .wf { display:flex; flex-direction:column; gap:8px; margin-top:6px; }
+  .wf-row { display:grid; grid-template-columns:150px 1fr 110px; align-items:center; gap:12px; font-size:13px; }
+  .wf-bar { height:22px; border-radius:5px; min-width:2px; transition:width .4s ease; }
+  .wf-amt { text-align:right; font-variant-numeric:tabular-nums; }
+  .wf-row[data-k="new"] .wf-bar { background:#2ecc71; }
+  .wf-row[data-k="reactivation"] .wf-bar { background:#3ba3ff; }
+  .wf-row[data-k="expansion"] .wf-bar { background:#9b7bff; }
+  .wf-row[data-k="contraction"] .wf-bar { background:#e8a33d; }
+  .wf-row[data-k="churn"] .wf-bar { background:#e5484d; }
+  .k-new { color:#2ecc71; font-weight:600; }
+  .k-reactivation { color:#3ba3ff; font-weight:600; }
+  .k-expansion { color:#9b7bff; font-weight:600; }
+  .k-contraction { color:#e8a33d; font-weight:600; }
+  .k-churn { color:#e5484d; font-weight:600; }
+  .prov { font-size:10px; letter-spacing:.5px; padding:2px 6px; border-radius:4px;
+    border:1px solid var(--line); color:var(--dim); }
+  .prov.MEASURED { border-color:#2ecc7155; color:#2ecc71; }
+  .ek { font-family:ui-monospace,monospace; font-size:11px; color:var(--dim); }
 </style>
 </head>
 <body>
@@ -72,6 +90,7 @@
     <button class="tab on" data-tab="shop">Shop</button>
     <button class="tab" data-tab="ops">Operations</button>
     <button class="tab" data-tab="sim">The customers</button>
+    <button class="tab" data-tab="rev">Revenue</button>
     <a class="tab" href="https://pay.b4rruf3t.com" target="_blank">minipay ↗</a>
   </nav>
 </header>
@@ -144,6 +163,45 @@
         authored, so they are a load and logic oracle, not a forecast.</div>
     </div>
   </section>
+
+  <!-- ================= REVENUE ================= -->
+  <section id="rev" class="hidden">
+    <div class="card">
+      <h2>A third service, which owns nothing</h2>
+      <div class="sub">minimart owns the goods. minipay owns the money. This one owns neither: it has its own
+        Postgres database, its own Kafka consumer group, and everything it knows it learned from an event.
+        It cannot query minimart even to settle an argument, because no connection between them exists.</div>
+
+      <div class="stats" id="revstats"></div>
+
+      <div class="note"><b>Why the same number appears twice.</b> MRR is stored as MOVEMENTS, never as a
+        total, for the same reason money is stored as entries: a figure you can overwrite is a figure nobody
+        can audit. The headline is the sum of every movement ever recorded. The second is that same figure
+        reached independently, through the projection. If they ever disagree, the drift is shown rather than
+        hidden, and the movements are the ones to believe.</div>
+    </div>
+
+    <div class="card">
+      <h2>Where the revenue came from</h2>
+      <div class="sub">Growth split into its causes, the only form in which the number means anything.</div>
+      <div id="waterfall" class="wf"></div>
+      <div class="note"><b>A renewal is cash, not growth.</b> Three months of renewals do not triple MRR, they
+        prove it: the revenue was counted the month the subscription began. Counting every payment as new MRR is
+        the most common way a dashboard shows a business growing 30% a month while the bank disagrees. Renewals
+        move this number only when the PRICE moved, and then only by the difference, which is why
+        <b class="k-expansion">expansion</b> is a row of its own.</div>
+    </div>
+
+    <div class="card">
+      <h2>Every movement, and the event that caused it</h2>
+      <div class="sub">The audit trail behind the headline. Each row names the exact event key it came from,
+        which is also the key that stopped it being counted twice when the broker redelivered it.</div>
+      <table id="movements"><tbody></tbody></table>
+      <div class="note"><b>Provenance is recorded, not assumed.</b> MEASURED means read straight off an event.
+        DERIVED means computed from measured facts. AUTHORED means seeded by hand. A reporting service that
+        cannot tell you which of the three a number is will eventually present all three as the same thing.</div>
+    </div>
+  </section>
 </main>
 
 <div class="toast" id="toast"></div>
@@ -156,7 +214,8 @@ let CUSTOMER = 7000 + Math.floor(Math.random() * 2000);
 
 document.querySelectorAll('.tab[data-tab]').forEach(b => b.onclick = () => {
   document.querySelectorAll('.tab[data-tab]').forEach(x => x.classList.toggle('on', x === b));
-  ['shop','ops','sim'].forEach(id => $('#' + id).classList.toggle('hidden', id !== b.dataset.tab));
+  if (b.dataset.tab === 'rev') loadRevenue();
+  ['shop','ops','sim','rev'].forEach(id => $('#' + id).classList.toggle('hidden', id !== b.dataset.tab));
 });
 
 function toast(msg) {
@@ -258,6 +317,78 @@ $('#run').onclick = async () => {
 loadProducts();
 loadOps();
 setInterval(loadOps, 3000);
+
+// ---------------------------------------------------------------- REVENUE
+// Every call below crosses into a DIFFERENT SERVICE with a different database.
+// Nothing on this page is served by the shop that took the orders.
+const KIND_LABEL = {new:'New', reactivation:'Reactivation', expansion:'Expansion',
+                    contraction:'Contraction', churn:'Churn'};
+
+async function loadRevenue() {
+  try {
+    const [m, w, mv] = await Promise.all([
+      fetch('/api/analytics/mrr').then(r => r.json()),
+      fetch('/api/analytics/waterfall').then(r => r.json()),
+      fetch('/api/analytics/movements').then(r => r.json())
+    ]);
+    renderRevStats(m);
+    renderWaterfall(w.waterfall || []);
+    renderMovements(mv.movements || []);
+  } catch (e) {
+    document.querySelector('#revstats').innerHTML =
+      '<div class="sub">the analytics service is not answering: ' + e + '</div>';
+  }
+}
+
+function renderRevStats(m) {
+  const drift = Number(m.drift || 0);
+  const rows = [
+    ['MRR', money(m.mrr), 'sum of every movement ever recorded'],
+    ['the same, via the projection', money(m.mrr_from_projection), 'reached independently'],
+    ['drift', drift === 0 ? 'none' : money(drift), drift === 0 ? 'the two agree exactly' : 'the projection has drifted'],
+    ['active subscriptions', m.active_subscriptions, 'contributing to the figure above'],
+    ['cash collected', money(m.collected), 'a different question from MRR'],
+    ['renewals observed', m.renewals, 'none of which moved MRR'],
+    ['events handled', m.events_handled, 'each exactly once, however often delivered']
+  ];
+  document.querySelector('#revstats').innerHTML = rows.map(r =>
+    '<div class="stat"><b>' + r[1] + '</b><span>' + r[0] + '</span>'
+    + '<span class="sub" style="margin:2px 0 0;font-size:11px">' + r[2] + '</span></div>').join('');
+}
+
+function renderWaterfall(rows) {
+  const el = document.querySelector('#waterfall');
+  if (!rows.length) {
+    el.innerHTML = '<span class="sub">nothing has moved revenue yet. Run a population on the customers tab.</span>';
+    return;
+  }
+  const max = Math.max.apply(null, rows.map(r => Math.abs(Number(r.amount))).concat([1]));
+  const order = ['new','reactivation','expansion','contraction','churn'];
+  rows.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
+  el.innerHTML = rows.map(r => {
+    const amt = Number(r.amount);
+    const pct = Math.max(2, Math.abs(amt) / max * 100);
+    return '<div class="wf-row" data-k="' + r.kind + '">'
+      + '<span class="k-' + r.kind + '">' + (KIND_LABEL[r.kind] || r.kind)
+      + ' <span class="sub" style="margin:0;font-weight:400">x' + r.count + '</span></span>'
+      + '<div class="wf-bar" style="width:' + pct + '%"></div>'
+      + '<span class="wf-amt">' + (amt > 0 ? '+' : '') + money(amt) + '</span></div>';
+  }).join('');
+}
+
+function renderMovements(rows) {
+  const tb = document.querySelector('#movements').querySelector('tbody');
+  if (!rows.length) { tb.innerHTML = '<tr><td class="sub">nothing has moved revenue yet</td></tr>'; return; }
+  tb.innerHTML = rows.map(r => '<tr>'
+    + '<td class="k-' + r.kind + '">' + (KIND_LABEL[r.kind] || r.kind) + '</td>'
+    + '<td style="text-align:right;font-variant-numeric:tabular-nums">'
+      + (Number(r.amount) > 0 ? '+' : '') + money(r.amount) + '</td>'
+    + '<td class="sub" style="margin:0">customer ' + r.customer_id + '</td>'
+    + '<td><span class="prov ' + r.provenance + '">' + r.provenance + '</span></td>'
+    + '<td class="ek">' + r.event_key + '</td>'
+    + '</tr>').join('');
+}
+
 </script>
 </body>
 </html>

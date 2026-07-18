@@ -226,31 +226,46 @@ class AnalyticsLessonTest {
      */
     @Test
     void lesson5_end_to_end_over_kafka_into_a_separate_database() throws Exception {
-        Billing.subscribe(TENANT, 3008L, MONTHLY, LOC, 30, T0);
-        Billing.subscribe(TENANT, 3009L, YEARLY, LOC, 365, T0);
-
-        OutboxRelay relay = new OutboxRelay(KAFKA);
+        // A group of its own, so this reader is not competing for partitions
+        // with a production consumer that may be running against the same
+        // broker, and started from the END of the log rather than the start:
+        // the topic is durable and holds every event every previous run left on
+        // it, so replaying it would mean a database write per historical record
+        // and a test that gets slower every time the system is used.
+        AnalyticsConsumer consumer = new AnalyticsConsumer(
+                KAFKA, Billing.TOPIC, "analytics-test-" + UUID.randomUUID(), false);
         try {
-            assertTrue(relay.publishPending(100) >= 2, "the relay shipped the subscription events");
-        } finally {
-            relay.close();
-        }
+            // join and take the partition assignment BEFORE anything is
+            // published, or "start at the end" means the end after the writes
+            consumer.drainOnce(Duration.ofSeconds(5));
 
-        AnalyticsConsumer consumer = new AnalyticsConsumer(KAFKA, Billing.TOPIC);
-        try {
-            int applied = 0;
-            long deadline = System.currentTimeMillis() + 20_000;
-            while (applied < 2 && System.currentTimeMillis() < deadline) {
-                applied += consumer.drainOnce(Duration.ofMillis(500));
+            Billing.subscribe(TENANT, 3008L, MONTHLY, LOC, 30, T0);
+            Billing.subscribe(TENANT, 3009L, YEARLY, LOC, 365, T0);
+
+            OutboxRelay relay = new OutboxRelay(KAFKA);
+            try {
+                assertTrue(relay.publishPending(100) >= 2, "the relay shipped the subscription events");
+            } finally {
+                relay.close();
             }
-            assertEquals(2, applied, "both events crossed the broker and were applied once each");
+
+            long deadline = System.currentTimeMillis() + 25_000;
+            while (statesFor(3008L, 3009L) < 2 && System.currentTimeMillis() < deadline) {
+                consumer.drainOnce(Duration.ofMillis(500));
+            }
         } finally {
             consumer.close();
         }
 
-        assertEquals(0, new BigDecimal("109.3151").compareTo(Projection.mrr(TENANT)),
-                "the revenue figure arrived in a database that cannot see minimart's tables");
-        System.out.println("lesson 5: minimart -> outbox -> kafka -> analytics db, MRR " + Projection.mrr(TENANT));
+        // the topic is a durable log that outlives any one run, so it also holds
+        // every event earlier runs left on it. What is asserted is therefore
+        // THESE two subscriptions, not a global total, which is the honest
+        // question anyway: did the pipeline carry these events across.
+        assertEquals(2, statesFor(3008L, 3009L),
+                "both events crossed the broker into a database that cannot see minimart's tables");
+        assertEquals(0, new BigDecimal("60.0000").compareTo(monthlyOf(3008L)), "the monthly plan, as issued");
+        assertEquals(0, new BigDecimal("49.3151").compareTo(monthlyOf(3009L)), "the yearly plan, normalised");
+        System.out.println("lesson 5: minimart -> outbox -> kafka -> analytics db, both subscriptions landed");
     }
 
     // ------------------------------------------------------------------ helpers
@@ -292,6 +307,12 @@ class AnalyticsLessonTest {
 
     private static BigDecimal collectedOf(String tenant) throws Exception {
         return dec("SELECT COALESCE(SUM(collected),0) FROM subscription_state WHERE tenant = '" + tenant + "'");
+    }
+
+    private static long statesFor(long... customerIds) throws Exception {
+        StringBuilder in = new StringBuilder();
+        for (long id : customerIds) { if (in.length() > 0) in.append(','); in.append(id); }
+        return one("SELECT COUNT(*) FROM subscription_state WHERE customer_id IN (" + in + ")");
     }
 
     private static BigDecimal monthlyOf(long customerId) throws Exception {
