@@ -47,16 +47,26 @@ public final class Idempotency {
         }
     }
 
-    /** Try to claim the key. Runs in its own short transaction so the marker
-     *  survives independently of the business work that follows. */
-    public static Claim claim(String key, String fingerprint) throws SQLException {
+    /**
+     * Try to claim the key. Runs in its own short transaction so the marker
+     * survives independently of the business work that follows.
+     *
+     * key arrives already namespaced by its caller, because the claim has to
+     * stay ONE statement: the INSERT ... ON CONFLICT is what makes two racing
+     * retries produce one winner, and a claim assembled from a SELECT plus an
+     * INSERT would hand both of them the payment. caller is the same
+     * namespace stored in its own right, so the row says who owns it instead
+     * of leaving that knowledge in a concatenated string in Java.
+     */
+    public static Claim claim(String key, String caller, String fingerprint) throws SQLException {
         try (Connection c = PayDb.open()) {
             c.setAutoCommit(false);
             try (PreparedStatement ps = c.prepareStatement(
-                    "INSERT INTO idempotency_keys(key, fingerprint, state) VALUES (?,?, 'in_flight') " +
+                    "INSERT INTO idempotency_keys(key, caller, fingerprint, state) VALUES (?,?,?, 'in_flight') " +
                     "ON CONFLICT (key) DO NOTHING")) {
                 ps.setString(1, key);
-                ps.setString(2, fingerprint);
+                ps.setString(2, caller);
+                ps.setString(3, fingerprint);
                 if (ps.executeUpdate() == 1) { c.commit(); return new Fresh(); }
             }
             try (PreparedStatement ps = c.prepareStatement(

@@ -17,6 +17,7 @@ import java.util.concurrent.Executors;
 import dev.minimart.core.Ledger;
 import dev.minipay.auth.ApiKeys;
 import dev.minipay.auth.CallerIdentity;
+import dev.minipay.auth.Enforcement;
 
 /**
  * minipay's HTTP surface, deliberately Stripe-shaped.
@@ -73,13 +74,34 @@ public final class PayApi {
         }
     }
 
-    /** Recent payment intents, for the console. */
+    /**
+     * Recent payment intents, for the console.
+     *
+     * A keyed caller sees its own merchant and no further. This list is where
+     * an attacker would go shopping for intent ids to capture, and a console
+     * that answers "here is everyone's" is a directory of other people's
+     * money whatever the endpoints behind it check.
+     */
     private static void list(HttpExchange ex) throws IOException {
+        try {
+            CallerIdentity identity = identityOf(ex, Act.READ);
+            if (identity == null) return;
+            String mine = identity.apiKey().map(CallerIdentity.BoundMerchant::merchant).orElse(null);
+            listRows(ex, mine);
+        } catch (Exception e) {
+            send(ex, 500, err(String.valueOf(e.getMessage())));
+        }
+    }
+
+    private static void listRows(HttpExchange ex, String merchant) throws IOException {
         try (Connection c = PayDb.open();
              var ps = c.prepareStatement("""
                      SELECT id, amount, currency, customer_ref, merchant_ref, status, business_at
-                     FROM payment_intents ORDER BY business_at DESC, id LIMIT 25""");
-             var rs = ps.executeQuery()) {
+                     FROM payment_intents WHERE (? IS NULL OR merchant_ref = ?)
+                     ORDER BY business_at DESC, id LIMIT 25""")) {
+            ps.setString(1, merchant);
+            ps.setString(2, merchant);
+            var rs = ps.executeQuery();
             StringBuilder b = new StringBuilder("[");
             boolean first = true;
             while (rs.next()) {
@@ -99,28 +121,58 @@ public final class PayApi {
         }
     }
 
-    /** The idempotency ledger itself: which keys were seen, and what they returned. */
+    /**
+     * The idempotency ledger itself: which keys were seen, and what they
+     * returned. A debugging view of the caller's OWN recent activity.
+     *
+     * THE NAMESPACE PREFIX NEVER LEAVES THIS SERVICE. The stored key begins
+     * with the namespace of whoever claimed it, so returning the column raw
+     * publishes live pk_ key ids to anybody who can reach the console, which
+     * is how a debugging view turns into a directory of who to impersonate.
+     * The caller already knows the half they sent, and that is the half they
+     * get back.
+     */
     private static void keys(HttpExchange ex) throws IOException {
-        try (Connection c = PayDb.open();
-             var ps = c.prepareStatement("""
-                     SELECT key, state, status_code, substr(fingerprint, 1, 12), created_at
-                     FROM idempotency_keys ORDER BY created_at DESC LIMIT 20""");
-             var rs = ps.executeQuery()) {
-            StringBuilder b = new StringBuilder("[");
-            boolean first = true;
-            while (rs.next()) {
-                if (!first) b.append(',');
-                first = false;
-                b.append("{\"key\":\"").append(Json.esc(rs.getString(1)))
-                 .append("\",\"state\":\"").append(rs.getString(2))
-                 .append("\",\"status\":").append(rs.getInt(3))
-                 .append(",\"fingerprint\":\"").append(Json.esc(rs.getString(4)))
-                 .append("\",\"at\":\"").append(rs.getTimestamp(5).toInstant()).append("\"}");
+        try {
+            CallerIdentity identity = identityOf(ex, Act.READ);
+            if (identity == null) return;
+            String namespace = identity.idempotencyNamespace();
+            try (Connection c = PayDb.open();
+                 var ps = c.prepareStatement("""
+                         SELECT key, caller, state, status_code, substr(fingerprint, 1, 12), created_at
+                         FROM idempotency_keys WHERE caller = ?
+                         ORDER BY created_at DESC LIMIT 20""")) {
+                ps.setString(1, namespace);
+                var rs = ps.executeQuery();
+                StringBuilder b = new StringBuilder("[");
+                boolean first = true;
+                while (rs.next()) {
+                    if (!first) b.append(',');
+                    first = false;
+                    b.append("{\"key\":\"").append(Json.esc(visibleKey(rs.getString(1), rs.getString(2))))
+                     .append("\",\"state\":\"").append(rs.getString(3))
+                     .append("\",\"status\":").append(rs.getInt(4))
+                     .append(",\"fingerprint\":\"").append(Json.esc(rs.getString(5)))
+                     .append("\",\"at\":\"").append(rs.getTimestamp(6).toInstant()).append("\"}");
+                }
+                send(ex, 200, b.append(']').toString());
             }
-            send(ex, 200, b.append(']').toString());
         } catch (Exception e) {
             send(ex, 500, err(String.valueOf(e.getMessage())));
         }
+    }
+
+    /** The caller-facing half of a stored key: their own string, never the
+     *  namespace in front of it. The second branch covers a row written
+     *  before the namespace had a column of its own. */
+    static String visibleKey(String key, String caller) {
+        if (key == null) return null;
+        if (caller != null && key.startsWith(caller + ":")) return key.substring(caller.length() + 1);
+        if (key.startsWith("key:")) {
+            int afterKeyId = key.indexOf(':', "key:".length());
+            if (afterKeyId > 0) return key.substring(afterKeyId + 1);
+        }
+        return key;
     }
 
     private static void intents(HttpExchange ex) throws IOException {
@@ -137,13 +189,30 @@ public final class PayApi {
             String[] parts = rest.split("/");
             String id = parts[0];
             if (parts.length == 1) {
-                Instant now = Instant.now();
-                if ("GET".equals(ex.getRequestMethod())) { send(ex, 200, render(PaymentIntents.get(id))); return; }
-                send(ex, 405, err("GET only"));
+                if (!"GET".equals(ex.getRequestMethod())) { send(ex, 405, err("GET only")); return; }
+                CallerIdentity reader = identityOf(ex, Act.READ);
+                if (reader == null) return;
+                if (!owns(reader, merchantOfIntent(id))) {
+                    send(ex, 403, err("this payment_intent belongs to another merchant"));
+                    return;
+                }
+                send(ex, 200, render(PaymentIntents.get(id)));
                 return;
             }
             String action = parts[1];
             if (!"POST".equals(ex.getRequestMethod())) { send(ex, 405, err("POST only")); return; }
+
+            // CAPTURE AND CANCEL TAKE AN ID AND NOTHING ELSE, which is why
+            // ownership has to be looked up rather than read off the request:
+            // there is nothing in the request to read it off. An intent id is
+            // a name, not a capability, and /v1/list hands names out.
+            CallerIdentity identity = identityOf(ex, Act.WRITE);
+            if (identity == null) return;
+            if (!owns(identity, merchantOfIntent(id))) {
+                send(ex, 403, err("this payment_intent belongs to another merchant"));
+                return;
+            }
+
             String body = read(ex);
             Instant at = businessAt(body);
             PaymentIntents.Result r = switch (action) {
@@ -164,26 +233,20 @@ public final class PayApi {
         String key = ex.getRequestHeaders().getFirst("Idempotency-Key");
         String fp = Idempotency.fingerprint(body);
 
-        // WHO IS CALLING — the acquirer's two-path question. An API key in
+        // WHO IS CALLING · the acquirer's two-path question. An API key in
         // X-Api-Key binds a merchant; a Bearer token will bind an estate
-        // customer once the SSO adapter lands. Both at once is not "extra
-        // authenticated" — it is two contradictory answers, and guessing
-        // which to believe would be worse than asking. That 400 is the one
-        // rejection the permissive phase is allowed to make.
-        String authorization = ex.getRequestHeaders().getFirst("Authorization");
-        String apiKeyHeader = ex.getRequestHeaders().getFirst("X-Api-Key");
-        if (CallerIdentity.isAmbiguous(authorization, apiKeyHeader)) {
-            send(ex, 400, err("send an Authorization token OR an X-Api-Key, not both — minipay will not guess who is calling"));
-            return;
-        }
-        CallerIdentity identity = resolveIdentity(apiKeyHeader);
+        // customer once the SSO adapter lands.
+        CallerIdentity identity = identityOf(ex, Act.WRITE);
+        if (identity == null) return;
 
-        // A keyed caller's idempotency namespace is its own: two NPCs sending
-        // the same key string must never replay each other's payments.
-        String caller = identity.apiKey().map(k -> "key:" + k.keyId()).orElse(null);
+        // Every caller's idempotency namespace is its own, the anonymous one
+        // included: two callers sending the same key string must never replay
+        // each other's payments, and a namespace nobody can type by hand is
+        // the only kind that survives an attacker who read the schema.
+        String caller = identity.idempotencyNamespace();
 
         if (key != null && !key.isBlank()) {
-            Idempotency.Claim claim = Idempotency.claim(scoped(key, caller), fp);
+            Idempotency.Claim claim = Idempotency.claim(scoped(key, identity), caller, fp);
             if (claim instanceof Idempotency.Replay r) {
                 // the whole point: the caller gets the identical answer twice
                 ex.getResponseHeaders().set("Idempotent-Replayed", "true");
@@ -207,7 +270,7 @@ public final class PayApi {
             String currency = Json.str(body, "currency");
             if (amount == null || customer == null || merchant == null) {
                 String e = err("need amount, customer, merchant");
-                if (key != null) Idempotency.complete(scoped(key, caller), 400, e);
+                if (key != null) Idempotency.complete(scoped(key, identity), 400, e);
                 send(ex, 400, e);
                 return;
             }
@@ -215,14 +278,12 @@ public final class PayApi {
             // THE DEPUTY CHECK. An API-key caller IS its merchant: a body
             // naming another merchant is not a request with extra
             // information, it is an attack with extra steps. merchantFor
-            // returns empty on contradiction — and contradiction is the one
+            // returns empty on contradiction, and contradiction is the one
             // thing even the permissive phase refuses.
             var acting = identity.merchantFor(merchant);
             if (acting.isEmpty()) {
-                String e = err("the API key is bound to merchant '"
-                    + identity.apiKey().get().merchant()
-                    + "' — a body naming another merchant is not this caller's request");
-                if (key != null) Idempotency.complete(scoped(key, caller), 403, e);
+                String e = foreignMerchant(identity);
+                if (key != null) Idempotency.complete(scoped(key, identity), 403, e);
                 send(ex, 403, e);
                 return;
             }
@@ -231,15 +292,33 @@ public final class PayApi {
             // THE SECOND DEPUTY CHECK. You never charge a customer by naming
             // them; you charge a pm_ attached for the pair. If the body names
             // a payment method, it must live under the acting merchant.
+            //
+            // AND IF IT NAMES NONE, THE QUESTION IS STILL OWED. Gating this on
+            // the presence of a payment_method made the check optional to the
+            // attacker: omit the field, and the wallet path charges whatever
+            // customer the body names, which is the entire attack the first
+            // check exists to stop, reached by leaving something out. A keyed
+            // caller may charge only customers registered under its own
+            // merchant, and a customer this processor has never heard of
+            // belongs to nobody, so it is not theirs to charge either.
             String pmId = Json.str(body, "payment_method");
+            String pmOwner, pmCustomer;
             if (pmId != null) {
                 PaymentMethods.Method pm = PaymentMethods.find(pmId);
-                if (pm != null && !identity.mayUsePaymentMethod(merchantOf(pm.customerId()), pm.customerId())) {
-                    String e = err("this payment method is not attached under merchant '" + merchant + "'");
-                    if (key != null) Idempotency.complete(scoped(key, caller), 403, e);
-                    send(ex, 403, e);
-                    return;
-                }
+                if (pm == null) { pmOwner = null; pmCustomer = null; }
+                else { pmCustomer = pm.customerId(); pmOwner = merchantOf(pmCustomer); }
+            } else {
+                pmCustomer = customer;
+                pmOwner = merchantOf(customer);
+            }
+            boolean checkable = pmId == null || pmCustomer != null;
+            if (checkable && !identity.mayUsePaymentMethod(pmOwner, pmCustomer)) {
+                String e = pmId != null
+                        ? err("this payment method is not attached under merchant '" + merchant + "'")
+                        : err("customer '" + customer + "' is not registered under merchant '" + merchant + "'");
+                if (key != null) Idempotency.complete(scoped(key, identity), 403, e);
+                send(ex, 403, e);
+                return;
             }
 
             String id = Json.str(body, "id");
@@ -256,31 +335,110 @@ public final class PayApi {
                     customer, merchant, pmId, businessAt(body));
             int status = r instanceof PaymentIntents.Ok ? 200 : (r instanceof PaymentIntents.Declined ? 402 : 409);
             String out = render(r);
-            if (key != null) Idempotency.complete(scoped(key, caller), status, out);
+            if (key != null) Idempotency.complete(scoped(key, identity), status, out);
             send(ex, status, out);
         } catch (Exception e) {
-            if (key != null) Idempotency.release(scoped(key, caller));   // genuine failure: let them retry for real
+            if (key != null) Idempotency.release(scoped(key, identity));   // genuine failure: let them retry for real
             throw e;
         }
     }
 
+    /** What a request is asking to do. READ looks, WRITE moves money. */
+    private enum Act { READ, WRITE }
+
+    /** The outcome of asking who is calling: an identity, or the refusal to serve. */
+    private sealed interface Auth permits Allowed, Refused {}
+    private record Allowed(CallerIdentity identity) implements Auth {}
+    private record Refused(int status, String message) implements Auth {}
+
     /**
-     * Resolve the caller. Today only the API-key path is live (it needs no
-     * external dependency: the key table is ours). The Bearer path lands
-     * with the SSO adapter — AudienceAuth from sso-client, the day that
-     * artifact resolves here — and will bind the estate customer through
-     * sso_accounts. Anonymous stays the default until activation.
+     * WHO IS CALLING · asked in exactly one place.
+     *
+     * Every handler that takes a merchant, a customer or an intent id comes
+     * through here, because nine contexts each deciding for themselves is how
+     * a service ends up with one endpoint that checks and eight that do not.
+     * The HTTP server has no Filter doing this for us, so the discipline is
+     * that the first line of a handler is this call.
+     *
+     * Today only the API-key path is live (it needs no external dependency:
+     * the key table is ours). The Bearer path lands with the SSO adapter,
+     * AudienceAuth from sso-client, and will bind the estate customer through
+     * sso_accounts.
+     *
+     * THREE CASES, AND ONLY THE MIDDLE ONE DEPENDS ON ACTIVATION:
+     *
+     *   a key that validates   the caller is its merchant, in both phases,
+     *                          and its scope decides whether it may write.
+     *   no credential at all   anonymous while permissive, 401 on a
+     *                          money-moving endpoint once enforced.
+     *   a credential that does
+     *   not validate           401 in both phases. Downgrading a bad key to
+     *                          anonymous would mean a revoked key keeps
+     *                          working, quietly, with fewer restrictions
+     *                          than it had before it was revoked.
      */
-    private static CallerIdentity resolveIdentity(String apiKeyHeader) throws SQLException {
-        if (apiKeyHeader == null || apiKeyHeader.isBlank()) return CallerIdentity.ANONYMOUS;
-        return ApiKeys.validate(apiKeyHeader)
-                .map(k -> CallerIdentity.ofApiKey(k.merchant(), k.keyId(), k.scope()))
-                .orElse(CallerIdentity.ANONYMOUS); // a bad key is no key, permissively — activation changes this
+    private static Auth authenticate(HttpExchange ex, Act act) throws SQLException {
+        String authorization = ex.getRequestHeaders().getFirst("Authorization");
+        String apiKeyHeader = ex.getRequestHeaders().getFirst("X-Api-Key");
+
+        // Two credentials are two contradictory answers, and guessing which to
+        // believe would be worse than asking. The one rejection the permissive
+        // phase was always allowed to make.
+        if (CallerIdentity.isAmbiguous(authorization, apiKeyHeader)) {
+            return new Refused(400, "send an Authorization token OR an X-Api-Key, not both: "
+                    + "minipay will not guess who is calling");
+        }
+
+        if (apiKeyHeader != null && !apiKeyHeader.isBlank()) {
+            var valid = ApiKeys.validate(apiKeyHeader);
+            if (valid.isEmpty()) {
+                // UNKNOWN, WRONG SECRET AND REVOKED ARE ONE ANSWER. Telling a
+                // caller which of the three they hit turns this endpoint into
+                // an oracle for enumerating live key ids.
+                return new Refused(401, "invalid API key");
+            }
+            CallerIdentity identity = CallerIdentity.ofApiKey(
+                    valid.get().merchant(), valid.get().keyId(), valid.get().scope());
+            if (act == Act.WRITE && !identity.mayWrite()) {
+                return new Refused(403, "this API key's scope is '" + valid.get().scope()
+                        + "', which may read but may not move money");
+            }
+            return new Allowed(identity);
+        }
+
+        if (act == Act.WRITE && Enforcement.on()) {
+            return new Refused(401, "this endpoint needs an API key");
+        }
+        return new Allowed(CallerIdentity.ANONYMOUS);
     }
 
-    /** Idempotency keys live in the caller's own namespace. */
-    private static String scoped(String key, String caller) {
-        return caller == null ? key : caller + ":" + key;
+    /** Resolve, or answer the refusal and return null. Null means answered. */
+    private static CallerIdentity identityOf(HttpExchange ex, Act act) throws SQLException, IOException {
+        Auth a = authenticate(ex, act);
+        if (a instanceof Refused r) { send(ex, r.status(), err(r.message())); return null; }
+        return ((Allowed) a).identity();
+    }
+
+    /**
+     * The merchant this request acts for, or null when the body's claim
+     * contradicts the credential. fallback covers the batch endpoints, which
+     * have a default merchant and a caller who may name none.
+     */
+    private static String actingMerchant(CallerIdentity identity, String named, String fallback) {
+        if (named == null || named.isBlank()) {
+            return identity.apiKey().map(CallerIdentity.BoundMerchant::merchant).orElse(fallback);
+        }
+        return identity.merchantFor(named).orElse(null);
+    }
+
+    private static String foreignMerchant(CallerIdentity identity) {
+        return err("the API key is bound to merchant '" + identity.apiKey().get().merchant()
+                + "', and a request naming another merchant is not this caller's request");
+    }
+
+    /** Idempotency keys live in the caller's own namespace, always. */
+    private static String scoped(String key, CallerIdentity identity) {
+        return identity.scopedIdempotencyKey(key);
     }
 
     /** Which merchant owns a cus_... record. Small lookup, big boundary. */
@@ -294,12 +452,47 @@ public final class PayApi {
         }
     }
 
+    /**
+     * Which merchant owns a pi_... record.
+     *
+     * Capture and cancel take an intent id and nothing else, so this lookup is
+     * the only thing standing between a caller and somebody else's authorised
+     * money. /v1/list publishes intent ids by design, which is fine for a
+     * console and fatal if the id is also the authorisation.
+     */
+    private static String merchantOfIntent(String intentId) throws SQLException {
+        try (Connection c = PayDb.open();
+             PreparedStatement ps = c.prepareStatement("SELECT merchant_ref FROM payment_intents WHERE id = ?")) {
+            ps.setString(1, intentId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
+
+    /**
+     * May this caller act on this intent. An unknown id is not refused here:
+     * it belongs to nobody, so the money path answers 404 and this check does
+     * not become a way to probe which ids exist.
+     */
+    private static boolean owns(CallerIdentity identity, String intentOwner) {
+        return intentOwner == null || identity.merchantFor(intentOwner).isPresent();
+    }
+
     private static void balance(HttpExchange ex) throws IOException {
         try {
             String q = ex.getRequestURI().getQuery();
             String merchant = null;
             if (q != null) for (String p : q.split("&")) if (p.startsWith("merchant=")) merchant = p.substring(9);
             if (merchant == null) { send(ex, 400, err("need ?merchant=")); return; }
+            CallerIdentity identity = identityOf(ex, Act.READ);
+            if (identity == null) return;
+            // A balance is the merchant's own business, and a key names its
+            // merchant. 'read' scope is allowed here: this is what it is for.
+            if (identity.merchantFor(merchant).isEmpty()) {
+                send(ex, 403, foreignMerchant(identity));
+                return;
+            }
             try (Connection c = PayDb.open()) {
                 BigDecimal held = safe(c, PaymentIntents.holds(merchant));
                 BigDecimal avail = safe(c, PaymentIntents.balance(merchant));
@@ -344,9 +537,19 @@ public final class PayApi {
     }
 
 
-    /** Build the day's clearing batch and send it to the issuer. */
+    /**
+     * Build the day's clearing batch and send it to the issuer.
+     *
+     * There is no ownership check here because there is nothing to own: a
+     * clearing batch is per issuer and per currency, across every merchant,
+     * and an operator job is what it is. What this endpoint does owe is the
+     * money-moving gate, so a 'read' key cannot run one and, once enforced,
+     * neither can a caller with no credential at all.
+     */
     private static void clearingRun(HttpExchange ex) throws IOException {
         try {
+            CallerIdentity identity = identityOf(ex, Act.WRITE);
+            if (identity == null) return;
             String body = read(ex);
             java.time.LocalDate day = java.time.LocalDate.parse(
                     orElse(Json.str(body, "business_date"), java.time.LocalDate.now().toString()));
@@ -370,10 +573,16 @@ public final class PayApi {
     /** Pay a merchant for a business day, net of this processor's fee. */
     private static void settlementRun(HttpExchange ex) throws IOException {
         try {
+            CallerIdentity identity = identityOf(ex, Act.WRITE);
+            if (identity == null) return;
             String body = read(ex);
             java.time.LocalDate day = java.time.LocalDate.parse(
                     orElse(Json.str(body, "business_date"), java.time.LocalDate.now().toString()));
-            Settlements.Batch b = Settlements.run(orElse(Json.str(body, "merchant"), "helix"),
+            // A payout goes to a merchant's own account, so naming the merchant
+            // is naming where the money lands.
+            String merchant = actingMerchant(identity, Json.str(body, "merchant"), "helix");
+            if (merchant == null) { send(ex, 403, foreignMerchant(identity)); return; }
+            Settlements.Batch b = Settlements.run(merchant,
                     orElse(Json.str(body, "currency"), "EUR"), day, businessAt(body));
             if (b == null) { send(ex, 200, "{\"settled\":false,\"reason\":\"nothing to settle\"}"); return; }
             // MONEY LEAVES THIS API AT TWO DECIMAL PLACES, ALWAYS. The ledger
@@ -394,6 +603,14 @@ public final class PayApi {
             String body = read(ex);
             String merchant = Json.str(body, "merchant"), ref = Json.str(body, "customer_ref");
             if (merchant == null || ref == null) { send(ex, 400, "{\"error\":\"need merchant, customer_ref\"}"); return; }
+            CallerIdentity identity = identityOf(ex, Act.WRITE);
+            if (identity == null) return;
+            // Registering a customer UNDER a merchant is the moment ownership
+            // is decided, and every later check reads it back. A caller who
+            // may name any merchant here has defeated all of them at once.
+            var acting = identity.merchantFor(merchant);
+            if (acting.isEmpty()) { send(ex, 403, foreignMerchant(identity)); return; }
+            merchant = acting.get();
             PaymentMethods.Customer c = PaymentMethods.customer(merchant, ref);
             send(ex, 200, "{\"id\":\"" + c.id() + "\",\"merchant_ref\":\"" + Json.esc(c.merchantRef()) + "\"}");
         } catch (Exception e) { send(ex, 500, err(String.valueOf(e.getMessage()))); }
@@ -412,6 +629,14 @@ public final class PayApi {
             String customer = Json.str(body, "customer");
             String type = Json.str(body, "type");
             if (customer == null) { send(ex, 400, "{\"error\":\"need customer\"}"); return; }
+            CallerIdentity identity = identityOf(ex, Act.WRITE);
+            if (identity == null) return;
+            // Attaching an instrument to a stranger's customer is how you make
+            // a pm_ that later passes the deputy check on the charge path.
+            if (!identity.mayUsePaymentMethod(merchantOf(customer), customer)) {
+                send(ex, 403, err("customer '" + customer + "' is not registered under this caller's merchant"));
+                return;
+            }
 
             PaymentMethods.Method m;
             if ("wallet".equals(type)) {

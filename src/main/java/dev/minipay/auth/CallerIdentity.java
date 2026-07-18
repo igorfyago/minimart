@@ -1,5 +1,6 @@
 package dev.minipay.auth;
 
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -28,9 +29,14 @@ import java.util.Optional;
  *
  * PERMISSIVE BY DEFAULT, per the estate rollout: no credential at all
  * means the request behaves exactly as it did before identity existed.
- * The body rules the day, the demos run, and nothing 401s. What this
- * record does TODAY is make the resolution path single and testable, so
- * the day a credential IS present, the precedence is already proven.
+ * The body rules the day, the demos run, and nothing 401s. Enforcement
+ * is the switch that ends that phase, and it is off until a deployment
+ * sets PAY_IDENTITY_ENFORCE.
+ *
+ * Permissive is a statement about callers who prove NOTHING. A caller who
+ * presents a credential is checked against it in either phase, because a
+ * credential honoured without being verified is not a lenient rollout, it
+ * is a wrong door.
  *
  * The money path — Rails, PaymentIntents, Settlements, Clearing — never
  * sees this type. Identity stops at the HTTP boundary. ON_US routing
@@ -38,8 +44,36 @@ import java.util.Optional;
  */
 public record CallerIdentity(Optional<String> ssoCustomer, Optional<BoundMerchant> apiKey) {
 
+    /**
+     * EXACTLY ONE ANSWER, OR NONE · enforced here rather than promised.
+     *
+     * A caller bound to a customer AND to a merchant is not a caller with
+     * more identity, it is the confused deputy already assembled: the code
+     * downstream would have to pick one, and every reader would pick a
+     * different one. isAmbiguous refuses the mixed state at the door; this
+     * constructor refuses it in memory, so the state cannot be reached by
+     * some later path that forgets to ask.
+     */
+    public CallerIdentity {
+        Objects.requireNonNull(ssoCustomer, "ssoCustomer");
+        Objects.requireNonNull(apiKey, "apiKey");
+        if (ssoCustomer.isPresent() && apiKey.isPresent()) {
+            throw new IllegalArgumentException(
+                "an identity is exactly one of customer-bound, merchant-bound, or nobody");
+        }
+    }
+
     /** A merchant proven by an API key, with the key's scope attached. */
     public record BoundMerchant(String merchant, String keyId, String scope) {}
+
+    /** The scopes a key may be issued with. Only 'read' is refused money. */
+    public static final String SCOPE_READ = "read";
+    public static final String SCOPE_CHARGE = "charge";
+    public static final String SCOPE_FULL = "full";
+
+    /** The namespace of a caller who proved nothing. Not the empty string:
+     *  see idempotencyNamespace for why the anonymous world needs a name. */
+    public static final String ANONYMOUS_NAMESPACE = "anon";
 
     /** Nobody proved anything. The behaviour of this service today. */
     public static final CallerIdentity ANONYMOUS =
@@ -104,6 +138,56 @@ public record CallerIdentity(Optional<String> ssoCustomer, Optional<BoundMerchan
         // SSO customer scoping activates with the sso_accounts mapping;
         // anonymous and SSO both pass today.
         return true;
+    }
+
+    /**
+     * MAY THIS CALLER MOVE MONEY, OR ONLY LOOK AT IT.
+     *
+     * A key is issued with a scope, and a scope that is documented but never
+     * consulted is worse than no scope at all: it is a promise the merchant
+     * made to their own security review on this service's behalf. 'read' is
+     * the whole point of the field, so 'read' is what it must actually cost:
+     * balances and lists, never a charge, a capture, a cancel, a settlement
+     * or a clearing run.
+     *
+     * A scope string this code does not recognise is not a licence. New
+     * verbs get added here deliberately or they do not work, which is the
+     * failure direction an acquirer wants.
+     *
+     * Callers with no key are not governed by scope. Whether they may act at
+     * all is Enforcement's question, and a different one.
+     */
+    public boolean mayWrite() {
+        if (apiKey.isEmpty()) return true;
+        String scope = apiKey.get().scope();
+        return SCOPE_CHARGE.equals(scope) || SCOPE_FULL.equals(scope);
+    }
+
+    /**
+     * THE IDEMPOTENCY NAMESPACE, AND WHY ANONYMOUS NEEDS ONE.
+     *
+     * Two callers sending the same key string must not replay each other's
+     * payments, so the stored key carries the caller's namespace. The trap
+     * is that a namespace made only of caller-supplied text can be typed by
+     * hand: leave anonymous callers un-prefixed and one of them sends
+     * Idempotency-Key: "key:pk_victim:K" and lands inside a real merchant's
+     * namespace, reading back a response that was never theirs.
+     *
+     * The fix is that EVERY caller has a prefix, including the one who
+     * proved nothing. An anonymous caller can still type "key:pk_victim:K",
+     * and it stores as "anon:key:pk_victim:K", which is a string no
+     * credential can ever produce. Anonymous callers share one namespace
+     * with each other, exactly as they shared one before identity existed.
+     */
+    public String idempotencyNamespace() {
+        if (apiKey.isPresent()) return "key:" + apiKey.get().keyId();
+        if (ssoCustomer.isPresent()) return "sso:" + ssoCustomer.get();
+        return ANONYMOUS_NAMESPACE;
+    }
+
+    /** The caller's key as it is stored: namespace first, always. */
+    public String scopedIdempotencyKey(String key) {
+        return idempotencyNamespace() + ":" + key;
     }
 
     /**

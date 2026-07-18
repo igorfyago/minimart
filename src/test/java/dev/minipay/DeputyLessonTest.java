@@ -80,8 +80,19 @@ class DeputyLessonTest {
 
     @Test
     void ssoAndKeyAreNeverBothPresentInAnIdentity() {
-        // the record makes the mixed state unwritable: an identity is
-        // exactly one of customer-bound, merchant-bound, or nobody
+        // THE MIXED STATE IS UNWRITABLE, and the only way to say that is to
+        // try to write it. Asserting that the two factories return what the
+        // two factories just set proves nothing about the type: it proves the
+        // factories were read correctly, which was never in doubt. The
+        // constructor is where the guarantee has to live, because a caller
+        // bound to a customer AND a merchant is the confused deputy already
+        // assembled, waiting for some later path to pick one.
+        assertThrows(IllegalArgumentException.class, () ->
+            new CallerIdentity(Optional.of("usr_1"),
+                Optional.of(new CallerIdentity.BoundMerchant("npc-shop-a", "pk_aaa", "charge"))),
+            "an identity is exactly one of customer-bound, merchant-bound, or nobody");
+
+        // and the two shapes that ARE allowed stay allowed
         var sso = CallerIdentity.ofSsoCustomer("usr_1");
         assertTrue(sso.ssoCustomer().isPresent());
         assertTrue(sso.apiKey().isEmpty());
