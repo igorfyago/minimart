@@ -58,9 +58,30 @@ non-negative CHECK under an ordered row lock.
 Time is a parameter everywhere (`business_at`); no business logic reads the wall clock, which is what will let a
 simulated year run in minutes without the logic noticing.
 
+**minipay · a small Stripe-shaped payment processor (done, 5/5 lessons green).** Its own database, its own ledger,
+its own process, reached only over HTTP. `PaymentIntent` runs authorize, capture and cancel, so authorised money is
+held and only becomes the merchant's on capture.
+
+The real work is the idempotency layer, and it distinguishes three cases that are usually conflated:
+
+- *same key, same request* → returns the **byte-identical response**, so a caller cannot tell a retry from the original.
+- *same key, different request* → `422`. That is a caller bug and silently doing either thing would be worse.
+- *same key, still running* → `409`. The first call owns it.
+
+Proven over a real socket, including twenty concurrent retries of one key charging exactly once. The network is the
+point: idempotency keys only mean anything when a response can be lost in flight.
+
+**Slice 2 · the race (done, 3/3 lessons green).** The reserved stock account is pooled per location and variant, so
+when the expiry sweeper and a shipment reach the same reservation together, deterministic transaction ids cannot
+referee it: the ids differ, both claim, and the ledger still sums to zero while the warehouse goes wrong. The
+reservation row is the referee, taken `FOR UPDATE` with a state check by both paths.
+
+- *40 reservations raced by shipment and sweeper* → 20 shipped, 20 released, every order settled exactly one way,
+  units conserved, no double settle.
+- *audit 3* (pooled reserved balance == units held by live reservations) catches a phantom release that sum-zero and
+  cache-drift both sleep through. That is the whole reason it exists.
+
 ### Next
-- **Slice 2 · the race.** Reservation expiry sweeper vs capture, refereed by a row lock and a state CAS. The pooled
-  reserved account means derived transaction ids alone cannot settle that race.
 - **Slice 3.** Catalog, cart, multi-line, HTTP surface.
 - **Slice 4.** Order saga over Kafka via the transactional outbox.
 - **Slices 5-6.** MRR movement ledger, then billing (a renewal is just an order with a derived id).
