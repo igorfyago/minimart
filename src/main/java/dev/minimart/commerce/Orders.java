@@ -164,7 +164,8 @@ public final class Orders {
                 dev.minimart.core.Outbox.append(c, TOPIC_ORDERS,
                         "order.placed:" + orderId, orderId.toString(),
                         "{\"type\":\"order.placed\",\"eventKey\":\"order.placed:" + orderId + "\",\"orderId\":\"" + orderId + "\",\"tenant\":\"" + tenant +
-                        "\",\"customer\":" + customerId + ",\"variant\":\"" + variantId + "\",\"qty\":" + qty +
+                        "\",\"customer\":" + customerId + ",\"variant\":\"" + variantId +
+                        "\",\"location\":\"" + location + "\",\"qty\":" + qty +
                         ",\"amount\":\"" + amount.toPlainString() + "\",\"at\":\"" + businessAt + "\"}",
                         businessAt);
                 c.commit();
@@ -245,7 +246,8 @@ public final class Orders {
                         "order." + orderState + ":" + orderId, orderId.toString(),
                         "{\"type\":\"order." + orderState + "\",\"eventKey\":\"order." + orderState + ":" + orderId + "\",\"orderId\":\"" + orderId +
                         "\",\"tenant\":\"" + tenant + "\",\"customer\":" + customerId +
-                        ",\"variant\":\"" + variantId + "\",\"qty\":" + qty +
+                        ",\"variant\":\"" + variantId + "\",\"location\":\"" + location +
+                        "\",\"qty\":" + qty +
                         ",\"amount\":\"" + amount.toPlainString() + "\",\"at\":\"" + businessAt + "\"}",
                         businessAt);
                 c.commit();

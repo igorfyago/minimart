@@ -70,7 +70,14 @@ public final class Main {
             try {
                 new dev.minimart.core.OutboxRelay(kafka).runLoop(1000);
                 new AnalyticsConsumer(kafka, dev.minimart.commerce.Billing.TOPIC).runLoop();
-                System.out.println("kafka: relay and analytics consumer running against " + kafka);
+                // The warehouse reacts to orders without checkout knowing it
+                // exists. Adding this required no change to the code that sells
+                // things, which is the entire argument for the broker.
+                new dev.minimart.core.EventConsumer(kafka,
+                        dev.minimart.commerce.Orders.TOPIC_ORDERS,
+                        dev.minimart.commerce.Replenishment.CONSUMER,
+                        dev.minimart.commerce.Replenishment::onOrderPlaced).runLoop(2000);
+                System.out.println("kafka: relay, analytics and replenishment consumers running against " + kafka);
             } catch (Exception e) {
                 System.out.println("kafka: unavailable (" + e.getMessage() + "), events queue in the outbox");
             }
