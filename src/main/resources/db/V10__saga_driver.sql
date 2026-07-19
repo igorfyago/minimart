@@ -1,0 +1,34 @@
+-- V10 · the third part of the saga: something that ACTS on an unsettled step.
+--
+-- V9 gave the seam a memory and Reconciler gave it a voice. Between them they
+-- can say, precisely and durably, that minipay is holding a real customer's
+-- money against an order minimart has thrown away. What neither of them can do
+-- is give the money back, so every one of those sentences waited for a person.
+--
+-- A driver changes that, and it is the dangerous half. A reporter that is wrong
+-- prints a wrong sentence. An actor that is wrong voids a hold a live order was
+-- about to capture, and the customer's checkout fails for reasons nobody can
+-- reconstruct. So the driver is deliberately small, it acts only on the two
+-- positions where the local order row PROVES what the shop wants, and these two
+-- columns are what keep it from being either a stampede or an infinite loop.
+--
+-- attempts   how many times the driver has taken this step in hand. It is the
+--            ceiling: a saga that retries forever is an outage that never gets
+--            reported, so the count stops the retrying and the giving-up is
+--            written into detail, where the reconciler already reads it.
+--
+-- claimed_at which driver holds this step, and since when. Two copies running at
+--            once, or one process double-scheduled, must not both call minipay
+--            about the same hold. The claim is a conditional UPDATE, the same
+--            discipline the outbox uses to publish an event once and minibank
+--            uses to move an authorisation once, for the same reason: agreeing
+--            not to collide is not a mechanism, and read-then-write is not a
+--            claim. It is a LEASE rather than a lock, because the alternative to
+--            an expiring claim is that one crashed driver strands a step for
+--            good, which is the failure this whole table exists to end.
+--
+-- Both default harmlessly for every row already here: an untouched step is one
+-- the driver has never attempted and nobody holds, which is exactly true.
+
+ALTER TABLE remote_steps ADD COLUMN IF NOT EXISTS attempts   INT NOT NULL DEFAULT 0;
+ALTER TABLE remote_steps ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;

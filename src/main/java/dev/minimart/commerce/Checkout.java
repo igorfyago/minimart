@@ -215,6 +215,25 @@ public final class Checkout {
         return voided;
     }
 
+    /**
+     * Release the hold and touch nothing local. What SagaDriver calls.
+     *
+     * cancel() is the wrong entry point for a repair even though it looks like
+     * the right one, because it also aborts the order. The driver only ever
+     * voids holds for orders that are ALREADY aborted, so calling cancel() would
+     * mean a sweeper re-running a state transition on rows it has no business
+     * transitioning, and the day that assumption slips it would abort a live one.
+     *
+     * It is the same remote step, journalled by the same code, on purpose. A
+     * second implementation of "void a hold at minipay" would be a second place
+     * to get the timeout distinction wrong, and that distinction · a refused
+     * connection is a no, anything else is a question · is the one thing this
+     * seam has learned that it cannot afford to learn twice.
+     */
+    static boolean voidHold(UUID orderId, Instant businessAt) throws SQLException {
+        return settle(orderId, RemoteSteps.CANCEL, businessAt);
+    }
+
     private static boolean settle(UUID orderId, String action, Instant businessAt) throws SQLException {
         RemoteSteps.begin(orderId, action, intentIdFor(orderId), businessAt);
         // The sabotage seams sit AFTER the journal entry on purpose: a fault
