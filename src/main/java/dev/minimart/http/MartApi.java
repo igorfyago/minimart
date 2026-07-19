@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpServer;
 import dev.minimart.commerce.Billing;
 import dev.minimart.commerce.Checkout;
 import dev.minimart.commerce.Orders;
+import dev.minimart.commerce.Reconciler;
 import dev.minimart.commerce.ReservationSweeper;
 import dev.minimart.core.Db;
 import dev.minimart.core.Json;
@@ -57,6 +58,7 @@ public final class MartApi {
         s.createContext("/api/sim/run", MartApi::simRun);
         s.createContext("/api/sim/status", MartApi::simStatus);
         s.createContext("/api/audit", MartApi::audit);
+        s.createContext("/api/reconcile", MartApi::reconcile);
         s.createContext("/api/stats", MartApi::stats);
         s.createContext("/api/orders/recent", MartApi::recentOrders);
         s.createContext("/api/stock/levels", MartApi::stockLevels);
@@ -436,6 +438,29 @@ public final class MartApi {
         } catch (Exception e) {
             send(ex, 500, err(e));
         }
+    }
+
+    /**
+     * THE FOURTH AUDIT, and the only one that leaves the building.
+     *
+     * /api/audit answers "are minimart's own books honest", and it can answer
+     * yes while a customer's money is stranded at the processor, because that
+     * question is entirely local. This one asks minipay what it thinks about
+     * each order and reports where the two services disagree.
+     *
+     * It is a GET and it moves nothing. An endpoint that reconciled by
+     * correcting would be a way to move money with a URL, and the discrepancies
+     * it acts on are by definition cases where the system does not currently
+     * know what is true.
+     */
+    private static void reconcile(HttpExchange ex) throws IOException {
+        try {
+            String tenant = param(ex, "tenant");
+            String limit = param(ex, "limit");
+            Reconciler.Report r = Reconciler.run(tenant == null ? "helix" : tenant,
+                    intOr(limit, 200));
+            send(ex, 200, Reconciler.toJson(r));
+        } catch (Exception e) { send(ex, 500, err(e)); }
     }
 
     private static String orderJson(UUID id) throws Exception {

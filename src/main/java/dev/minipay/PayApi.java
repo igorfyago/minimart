@@ -87,20 +87,43 @@ public final class PayApi {
             CallerIdentity identity = identityOf(ex, Act.READ);
             if (identity == null) return;
             String mine = identity.apiKey().map(CallerIdentity.BoundMerchant::merchant).orElse(null);
-            listRows(ex, mine);
+            listRows(ex, mine, limitOf(ex));
         } catch (Exception e) {
             send(ex, 500, err(String.valueOf(e.getMessage())));
         }
     }
 
-    private static void listRows(HttpExchange ex, String merchant) throws IOException {
+    /**
+     * How many rows to answer with. 25 by default, because this began as a
+     * console view and a console wants a page.
+     *
+     * A RECONCILER IS NOT A CONSOLE. Something comparing this processor's
+     * payments against a merchant's orders has to see all of them, and a
+     * fixed page silently turns "the two services agree" into "the two services
+     * agree about the twenty-five most recent", which is a different and much
+     * less useful sentence. The cap is still real, so this stays a list endpoint
+     * rather than a way to ask for the whole table in one request.
+     */
+    private static int limitOf(HttpExchange ex) {
+        String q = ex.getRequestURI().getQuery();
+        if (q == null) return 25;
+        for (String p : q.split("&")) {
+            if (!p.startsWith("limit=")) continue;
+            try { return Math.min(500, Math.max(1, Integer.parseInt(p.substring(6)))); }
+            catch (NumberFormatException e) { return 25; }
+        }
+        return 25;
+    }
+
+    private static void listRows(HttpExchange ex, String merchant, int limit) throws IOException {
         try (Connection c = PayDb.open();
              var ps = c.prepareStatement("""
                      SELECT id, amount, currency, customer_ref, merchant_ref, status, business_at
                      FROM payment_intents WHERE (? IS NULL OR merchant_ref = ?)
-                     ORDER BY business_at DESC, id LIMIT 25""")) {
+                     ORDER BY business_at DESC, id LIMIT ?""")) {
             ps.setString(1, merchant);
             ps.setString(2, merchant);
+            ps.setInt(3, limit);
             var rs = ps.executeQuery();
             StringBuilder b = new StringBuilder("[");
             boolean first = true;
