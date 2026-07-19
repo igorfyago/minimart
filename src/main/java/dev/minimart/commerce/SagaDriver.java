@@ -381,10 +381,13 @@ public final class SagaDriver {
             // reader that walks the object's own top-level members is the
             // stricter tool and this call wants it, for a worse reason than the
             // reconciler does: there a misread status prints a wrong sentence,
-            // here it decides whether to release a hold. One is landing beside
-            // this work; this switches to it the moment it is on main rather
-            // than depending on a file that has not landed yet.
-            String status = Json.str(r.body(), "status");
+            // here it DECIDES WHETHER TO RELEASE A HOLD. str() answers with the
+            // first occurrence of a key anywhere it appears, nested objects and
+            // quoted text alike, so a payment_method or an echoed request
+            // carrying its own "status" could speak for the intent. This body is
+            // minipay's to shape, not ours, which is exactly the case text()
+            // exists for.
+            String status = Json.text(r.body(), "status");
             // minipay answers 200 with an error body for an id it does not know.
             return status == null ? "absent" : status;
         } catch (Exception e) {
