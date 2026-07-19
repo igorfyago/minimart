@@ -234,16 +234,160 @@ public final class Reconciler {
                         .timeout(Duration.ofSeconds(3)).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         if (r.statusCode() != 200) throw new IllegalStateException("HTTP " + r.statusCode());
-        // Json is a scanner, not a parser, so this reads the array as parallel
-        // columns in document order. That holds because minipay writes every row
-        // with the same keys in the same order, and it is stated here so the
-        // coupling is a known cost rather than a surprise the day it breaks.
-        List<String> ids = Json.each(r.body(), "id");
-        List<String> merchants = Json.each(r.body(), "merchant");
+
+        // THIS ENDPOINT ANSWERS WITH AN ARRAY, AND ANYTHING ELSE IS NOT AN
+        // ANSWER. An error body or a wrapped envelope would otherwise be read
+        // as one enormous row and the whole page would silently shrink to a
+        // single comparison. Throwing sends it to run()'s unreachable count,
+        // which is the difference between "not checked" and "checked and fine".
+        String body = r.body() == null ? "" : r.body().stripLeading();
+        if (!body.startsWith("[")) throw new IllegalStateException("expected a JSON array of payments");
+
+        // A ROW IS READ AS A ROW, NOT AS A POSITION IN TWO LISTS.
+        //
+        // This used to collect every "id" in the document and every "merchant"
+        // in the document and pair them by index, which is a bet that minipay
+        // emits exactly one of each key per row, forever. The bet loses quietly:
+        // one row carrying a nested object with its own id, or one row missing a
+        // key another row has, shifts every later pairing by one, and from then
+        // on this compares one payment's merchant against another payment's id.
+        //
+        // The consequence is the worst available. A tool built to find money
+        // stranded between two services starts inventing discrepancies that are
+        // not real and, in the other direction, agreeing about pairs it never
+        // actually compared. It would also attribute one merchant's payments to
+        // another, which is a leak as well as a lie. Nothing about the failure
+        // looks like a failure: the report still reads perfectly.
+        //
+        // So the array is split into its objects first and each row is asked its
+        // own questions, using a reader that walks the row's own members rather
+        // than searching its text. Splitting alone would not have been enough.
+        // Json.str answers with the FIRST occurrence of a key in what it is
+        // given, so a row whose nested payment method is written before its own
+        // id hands back the card's id as the payment's. That is the same bet as
+        // before in a smaller coat: no longer "minipay writes every row alike",
+        // merely "minipay writes the keys of a row in the order we expect".
+        // Neither is ours to make, and this one is not visible when it breaks.
         List<String> out = new ArrayList<>();
-        for (int i = 0; i < ids.size(); i++) {
-            if (i < merchants.size() && !tenant.equals(merchants.get(i))) continue;
-            out.add(ids.get(i));
+        for (String row : rows(body)) {
+            String id = member(row, "id");
+            // A row that will not say whose it is cannot be attributed to this
+            // merchant. Skipping it is the honest answer: the alternative is to
+            // guess, and guessing is what this class exists to stop.
+            if (id == null || !tenant.equals(member(row, "merchant"))) continue;
+            out.add(id);
+        }
+        return out;
+    }
+
+    /**
+     * The string a key holds at the TOP LEVEL of one row, or null.
+     *
+     * This belongs beside str() in core.Json and sits here because this change
+     * is scoped to the reconciler. The duplication is at least the house's own
+     * kind: the codec is already deliberately copied per service so that a
+     * merchant and its processor share no model object.
+     */
+    static String member(String row, String key) {
+        if (row == null) return null;
+        int i = ws(row, 0);
+        if (i >= row.length() || row.charAt(i) != '{') return null;
+        i = ws(row, i + 1);
+        while (i < row.length() && row.charAt(i) == '"') {
+            int nameEnd = endOfString(row, i);
+            if (nameEnd < 0) return null;
+            String name = row.substring(i + 1, nameEnd);
+            i = ws(row, nameEnd + 1);
+            if (i >= row.length() || row.charAt(i) != ':') return null;
+            i = ws(row, i + 1);
+            int valueEnd = endOfValue(row, i);
+            if (valueEnd < 0) return null;
+            if (name.equals(key)) {
+                if (row.charAt(i) != '"') return null;          // asked for a name, given a number
+                return unescape(row.substring(i + 1, valueEnd - 1));
+            }
+            // Either another member follows, or the row ended without the key
+            // and the answer is that this row does not have one.
+            i = ws(row, valueEnd);
+            if (i >= row.length() || row.charAt(i) != ',') return null;
+            i = ws(row, i + 1);
+        }
+        return null;
+    }
+
+    private static int ws(String s, int i) {
+        while (i < s.length() && Character.isWhitespace(s.charAt(i))) i++;
+        return i;
+    }
+
+    /** The index of the quote that closes the string starting at i. */
+    private static int endOfString(String s, int i) {
+        for (int j = i + 1; j < s.length(); j++) {
+            char ch = s.charAt(j);
+            if (ch == '\\') { j++; continue; }                  // an escaped quote is not the end
+            if (ch == '"') return j;
+        }
+        return -1;
+    }
+
+    /** One past the end of the value starting at i, whatever kind it is. */
+    private static int endOfValue(String s, int i) {
+        if (i >= s.length()) return -1;
+        char ch = s.charAt(i);
+        if (ch == '"') { int e = endOfString(s, i); return e < 0 ? -1 : e + 1; }
+        if (ch == '{' || ch == '[') {
+            int depth = 0;
+            for (int j = i; j < s.length(); j++) {
+                char c = s.charAt(j);
+                if (c == '"') { int e = endOfString(s, j); if (e < 0) return -1; j = e; continue; }
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') { if (--depth == 0) return j + 1; }
+            }
+            return -1;
+        }
+        int j = i;
+        while (j < s.length() && ",}] \t\r\n".indexOf(s.charAt(j)) < 0) j++;
+        return j == i ? -1 : j;
+    }
+
+    /** As core.Json's str() does it: drop the backslash and keep what follows. */
+    private static String unescape(String s) {
+        if (s.indexOf('\\') < 0) return s;
+        StringBuilder b = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            if (ch == '\\' && i + 1 < s.length()) { b.append(s.charAt(++i)); continue; }
+            b.append(ch);
+        }
+        return b.toString();
+    }
+
+    /**
+     * The objects of a JSON array, each returned as its own document.
+     *
+     * Brace counting rather than a parser, in keeping with the codec this
+     * service already has, and string-aware because a brace inside a quoted
+     * value is text and counting it would tear a row in half.
+     */
+    static List<String> rows(String json) {
+        List<String> out = new ArrayList<>();
+        if (json == null) return out;
+        int depth = 0, start = -1;
+        for (int i = 0; i < json.length(); i++) {
+            char ch = json.charAt(i);
+            if (ch == '"') {                                  // step over the whole string
+                for (i++; i < json.length(); i++) {
+                    char c = json.charAt(i);
+                    if (c == '\\') { i++; continue; }          // an escaped quote is not the end
+                    if (c == '"') break;
+                }
+                continue;
+            }
+            if (ch == '{') { if (depth++ == 0) start = i; }
+            else if (ch == '}' && depth > 0 && --depth == 0 && start >= 0) {
+                out.add(json.substring(start, i + 1));
+                start = -1;
+            }
         }
         return out;
     }

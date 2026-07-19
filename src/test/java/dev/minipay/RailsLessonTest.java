@@ -348,6 +348,78 @@ class RailsLessonTest {
         System.out.println("lesson 8: a reference reused for a larger amount was refused by the issuer");
     }
 
+    /**
+     * LESSON 9 · AN APPROVAL IS A FIELD, NOT A SUBSTRING.
+     *
+     * Found by review, and it was the money decision taken by grep. The on-us
+     * path decided whether to approve by asking whether the issuer's raw
+     * response CONTAINED the bytes "approved":true, so anything carrying that
+     * sequence anywhere bought the goods: an echoed request, a nested object,
+     * or a decline whose diagnostic quotes the very field it is refusing.
+     *
+     * None of that is the issuer's fault, and that is the part worth keeping.
+     * The decline below says no in the first field of its answer and is correct
+     * throughout; it merely also explains itself, which is what a good error
+     * message does. A processor whose approvals can be flipped by a bank
+     * improving its wording is not reading an answer, it is pattern-matching on
+     * one, and the failure would arrive as a deployment at the other company.
+     */
+    @Test
+    void lesson9_a_decline_that_quotes_the_request_is_still_a_decline() throws Exception {
+        String token = "mbc_chatty_decline";
+        limits.put(token, new BigDecimal("10.00"));
+
+        var cus = PaymentMethods.customer(MERCHANT, "verbose-issuer");
+        var pm = PaymentMethods.attachCard(cus.id(), "ON_US", token, "minibank credit", "5555");
+
+        String intent = "pi_" + UUID.randomUUID();
+        var r = PaymentIntents.authorize(intent, new BigDecimal("40.00"), "EUR",
+                "verbose-issuer", MERCHANT, pm.id(), T0);
+
+        assertInstanceOf(PaymentIntents.Declined.class, r,
+                "THE ISSUER SAID NO in the field that decides, so no is the answer: " + r);
+        assertEquals("insufficient credit", ((PaymentIntents.Declined) r).reason(),
+                "and the reason is the issuer's own top-level one, not a phrase lifted from its diagnostic");
+
+        assertEquals(0, authState.size(), "no hold exists anywhere for a payment that was refused");
+        assertEquals(0, new BigDecimal("10.00").compareTo(remaining(token)),
+                "the customer's credit limit is exactly as it was");
+        assertEquals(0, entryCount(), "and not one ledger entry, because nothing was approved");
+        assertEquals("declined", statusOf(intent), "recorded as declined, so the merchant can be told why");
+        System.out.println("lesson 9: a decline carrying \"approved\":true in a nested diagnostic stayed a decline");
+    }
+
+    /**
+     * LESSON 10 · AN ANSWER GIVEN TWICE IS NOT AN ANSWER.
+     *
+     * The narrower cousin of lesson 9, and the reason the fix there is a walk
+     * over the response rather than a better search through it. Duplicate keys
+     * are legal on the wire and no two JSON readers agree about which one wins:
+     * take the first and this declines, take the last and it approves. The
+     * body is identical either way, so whether the customer's money moves would
+     * be decided by a library upgrade.
+     *
+     * A processor cannot make that ambiguity go away, and it does not have to.
+     * It can refuse to guess, which is the same instinct as lesson 5: when the
+     * issuer has not clearly said yes, the answer is no.
+     */
+    @Test
+    void lesson10_an_issuer_that_answers_twice_has_not_approved_anything() throws Exception {
+        String token = "mbc_two_answers";
+        limits.put(token, new BigDecimal("1000.00"));
+
+        var cus = PaymentMethods.customer(MERCHANT, "ambiguous");
+        var pm = PaymentMethods.attachCard(cus.id(), "ON_US", token, "minibank credit", "6666");
+
+        var r = PaymentIntents.authorize("pi_" + UUID.randomUUID(), new BigDecimal("30.00"), "EUR",
+                "ambiguous", MERCHANT, pm.id(), T0);
+
+        assertInstanceOf(PaymentIntents.Declined.class, r,
+                "AN AMBIGUOUS ANSWER IS NOT A YES, and only a yes may move money: " + r);
+        assertEquals(0, entryCount(), "so nothing moved on a body two readers would read differently");
+        System.out.println("lesson 10: an issuer that said both false and true was not treated as having approved");
+    }
+
     // ------------------------------------------------------- the stand-in bank
 
     /** minibank's real protocol, answered by a stand-in, so these lessons do
@@ -381,6 +453,31 @@ class RailsLessonTest {
         String token = Json.str(body, "instrument");
         String authId = Json.str(body, "authorization_id");
         BigDecimal amount = new BigDecimal(Json.str(body, "amount"));
+
+        if ("mbc_chatty_decline".equals(token)) {
+            // AN ISSUER THAT EXPLAINS ITSELF, which is a bank getting BETTER.
+            //
+            // Every byte here is a correct decline: approved is false in the
+            // field that decides, and the diagnostic names the check that
+            // failed and quotes it. A stand-in that only ever answered tersely
+            // would agree with the acquirer's assumptions instead of testing
+            // them, which is lesson 8's point applied to wording.
+            respond(ex, 200, """
+                    {"approved":false,
+                     "reason":"insufficient credit",
+                     "diagnostic":{"rule":"limit",
+                                   "note":"would need \\"approved\\":true from the limit check",
+                                   "expected":{"approved":true}}}""");
+            return;
+        }
+
+        if ("mbc_two_answers".equals(token)) {
+            // A BANK THAT ANSWERS TWICE. Duplicate keys are legal on the wire
+            // and which one wins is genuinely reader-dependent, so this is a
+            // body two correct readers can disagree about.
+            respond(ex, 200, "{\"approved\":false,\"reason\":\"stolen card\",\"approved\":true}");
+            return;
+        }
 
         if (authState.containsKey(authId)) {
             // A RETRY IS THE SAME AUTHORISATION, AND ONLY IF IT IS THE SAME

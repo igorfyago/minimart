@@ -217,35 +217,84 @@ public final class PaymentIntents {
         return settle(id, businessAt, false);
     }
 
+    /**
+     * Capture or cancel, WITH THE ISSUER CALLED OUTSIDE THE TRANSACTION.
+     *
+     * This used to hold a pooled connection and a FOR UPDATE row lock across the
+     * synchronous call to the bank. The pool is sixteen connections and the
+     * issuer call waits five seconds, so seventeen shoppers checking out against
+     * a hung issuer consumed every connection this processor has, and endpoints
+     * that never speak to an issuer at all stopped answering: listing payments,
+     * reading a key, checking whether the service is alive. A DEPENDENCY'S
+     * LATENCY BECAME AN OUTAGE OF UNRELATED FUNCTIONALITY, and the blast radius
+     * was the whole service rather than the payments that actually needed a bank.
+     *
+     * So the shape is read, decide, call, then COMPARE AND SWAP: the state is
+     * read again under the lock once the issuer has answered, and the books move
+     * only if it is still the state the decision was made on. The lock now covers
+     * the writes and nothing else, which is the only work it was ever protecting.
+     *
+     * THE WINDOW THIS OPENS IS REAL AND IT IS CLOSED AT THE FAR END. Two callers
+     * can now both reach the issuer for one payment, one capturing and one
+     * voiding, where the lock previously let exactly one through. The issuer
+     * refuses the second, because a hold that has been captured cannot then be
+     * voided and the reverse, and a refusal leaves this side untouched. That is
+     * the right place for it: THE ISSUER IS THE AUTHORITY ON THE HOLD, and a
+     * processor that leans on its own row lock to keep a bank consistent has
+     * misplaced the record it is defending.
+     */
     private static Result settle(String id, Instant businessAt, boolean capture) throws SQLException {
+        String target = capture ? "succeeded" : "canceled";
+
+        // The state the decision is made on. Read it and LET GO: nothing of this
+        // processor's is held while a bank thinks. Everything read here but the
+        // status is fixed at insert and cannot drift, so only the status needs
+        // checking again afterwards.
+        String status, customer, merchant, currency, rail, authRef; BigDecimal amount;
+        try (Connection c = PayDb.open();
+             PreparedStatement ps = c.prepareStatement("""
+                     SELECT status, customer_ref, merchant_ref, currency, amount, rail, issuer_authorization
+                       FROM payment_intents WHERE id = ?""")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return new NotFound(id);
+                status = rs.getString(1); customer = rs.getString(2);
+                merchant = rs.getString(3); currency = rs.getString(4); amount = rs.getBigDecimal(5);
+                rail = rs.getString(6); authRef = rs.getString(7);
+            }
+        }
+        if (target.equals(status)) return new Ok(id, status, amount);            // idempotent
+        if (!"requires_capture".equals(status)) return new WrongState(id, status);
+
+        // Tell the issuer BEFORE this processor's books say it is done. A
+        // capture recorded here that the issuer never performed is money this
+        // processor believes it has and no bank has released, and the merchant
+        // would be paid out of a balance that does not exist.
+        boolean railOk = capture
+                ? Rails.capture(rail, authRef, businessAt)
+                : Rails.release(rail, authRef, businessAt);
+        if (!railOk) return new Declined("issuer unavailable");
+
         try (Connection c = PayDb.open()) {
             c.setAutoCommit(false);
             try {
-                String status, customer, merchant, currency, rail, authRef; BigDecimal amount;
-                try (PreparedStatement ps = c.prepareStatement("""
-                        SELECT status, customer_ref, merchant_ref, currency, amount, rail, issuer_authorization
-                          FROM payment_intents WHERE id = ? FOR UPDATE""")) {
+                // THE SWAP HALF OF THE COMPARE AND SWAP. The issuer has answered
+                // and somebody may have moved this payment while it did, so the
+                // status is read again under the lock and the answer only stands
+                // if nothing changed. Losing here is not a fault: it means
+                // another caller completed the same work, and it is reported as
+                // whatever actually happened rather than as what we intended.
+                String now;
+                try (PreparedStatement ps = c.prepareStatement(
+                        "SELECT status FROM payment_intents WHERE id = ? FOR UPDATE")) {
                     ps.setString(1, id);
                     try (ResultSet rs = ps.executeQuery()) {
                         if (!rs.next()) { c.rollback(); return new NotFound(id); }
-                        status = rs.getString(1); customer = rs.getString(2);
-                        merchant = rs.getString(3); currency = rs.getString(4); amount = rs.getBigDecimal(5);
-                        rail = rs.getString(6); authRef = rs.getString(7);
+                        now = rs.getString(1);
                     }
                 }
-                String target = capture ? "succeeded" : "canceled";
-                if (target.equals(status)) { c.rollback(); return new Ok(id, status, amount); }  // idempotent
-                if (!"requires_capture".equals(status)) { c.rollback(); return new WrongState(id, status); }
-
-                // Tell the issuer BEFORE this processor's books say it is done.
-                // A capture recorded here that the issuer never performed is
-                // money this processor believes it has and no bank has released,
-                // and the merchant would be paid out of a balance that does not
-                // exist.
-                boolean railOk = capture
-                        ? Rails.capture(rail, authRef, businessAt)
-                        : Rails.release(rail, authRef, businessAt);
-                if (!railOk) { c.rollback(); return new Declined("issuer unavailable"); }
+                if (target.equals(now)) { c.rollback(); return new Ok(id, now, amount); }
+                if (!"requires_capture".equals(now)) { c.rollback(); return new WrongState(id, now); }
 
                 // A CAPTURE TAKES THE CARDHOLDER'S MONEY. IT DOES NOT PAY THE
                 // MERCHANT.

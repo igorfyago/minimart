@@ -109,10 +109,21 @@ public final class Rails {
             // it creates. Until that exists, unreachable means declined.
             return Outcome.declined("issuer unavailable");
         }
-        boolean approved = response.contains("\"approved\":true");
+        // AN APPROVAL IS A FIELD THE ISSUER SET, NEVER A BYTE SEQUENCE FOUND
+        // SOMEWHERE IN ITS ANSWER.
+        //
+        // This was a contains() on the raw body, which is the whole money
+        // decision taken by grep. Any response merely CONTAINING those bytes
+        // read as an approval: an echoed request, a nested object, or a decline
+        // whose diagnostic quotes back the field it is refusing. An issuer
+        // improving its error messages could have bought the merchant's goods.
+        //
+        // Absent, malformed or non-boolean all mean not approved, because the
+        // only answer that may move money is the issuer plainly saying yes.
+        boolean approved = Boolean.TRUE.equals(Json.bool(response, "approved"));
         return approved
                 ? Outcome.approved(authRef.toString())
-                : Outcome.declined(orElse(Json.str(response, "reason"), "declined by issuer"));
+                : Outcome.declined(orElse(Json.text(response, "reason"), "declined by issuer"));
     }
 
     private static String issuerCall(String path, String body, Instant businessAt) {
