@@ -422,6 +422,51 @@ class SeamLessonTest {
         }
     }
 
+
+    @Test
+    @Order(7)
+    void lesson7_theJournalNeverChangesTheOutcomeItRecords() throws Exception {
+        // The journal is a NOTE about a fact that already lives in someone
+        // else's database. The asymmetry between the two calls is the design,
+        // so it is asserted rather than left to be tidied away later.
+        //
+        // begin() runs BEFORE the request leaves. If it cannot write, nothing
+        // has moved and refusing the attempt is right: an unrecorded call is
+        // exactly what this table exists to prevent. It MUST be able to throw.
+        //
+        // finish() runs AFTER, when the money has already moved. Both
+        // directions of that lie were reachable while it threw. On the success
+        // path a captured payment whose note failed surfaced to the shop as
+        // "the capture failed", so it believed the money was still there. On
+        // the failure path the note's own SQLException replaced the exception
+        // that said what actually went wrong, and a dead database is the
+        // likeliest reason the local step failed in the first place.
+        assertTrue(throwsChecked(RemoteSteps.class, "begin"),
+                "begin must be able to refuse: nothing has moved yet");
+        assertFalse(throwsChecked(RemoteSteps.class, "finish"),
+                "finish must not be able to throw at a money path that already completed");
+
+        // and it must be able to TELL the caller the note was lost, so that
+        // losing one is a fact rather than a silence
+        assertEquals(boolean.class, RemoteSteps.class
+                .getMethod("finish", UUID.class, String.class,
+                           RemoteSteps.State.class, String.class).getReturnType(),
+                "finish reports whether the note landed");
+
+        System.out.println("lesson 7: a lost note degrades the journal, never the answer.");
+    }
+
+    /** True when the method declares any checked exception. */
+    private static boolean throwsChecked(Class<?> type, String method) {
+        for (java.lang.reflect.Method m : type.getMethods()) {
+            if (!m.getName().equals(method)) continue;
+            for (Class<?> ex : m.getExceptionTypes()) {
+                if (!RuntimeException.class.isAssignableFrom(ex)) return true;
+            }
+        }
+        return false;
+    }
+
     private static long count(Connection c, String sql) throws Exception {
         try (PreparedStatement ps = c.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
             rs.next(); return rs.getLong(1);

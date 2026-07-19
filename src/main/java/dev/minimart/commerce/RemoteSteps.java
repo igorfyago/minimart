@@ -88,9 +88,45 @@ public final class RemoteSteps {
         }
     }
 
-    /** Record what came back. Called on every path out of the attempt, including
-     *  the ones that throw, which is why the callers use finally-shaped code. */
-    public static void finish(UUID orderId, String action, State state, String detail)
+    /**
+     * Record what came back. Called on every path out of the attempt, including
+     * the ones that throw, which is why the callers use finally-shaped code.
+     *
+     * THIS NEVER THROWS, and that asymmetry with begin() is the whole design.
+     *
+     * begin() runs BEFORE the request leaves, so if it cannot write, the right
+     * answer is to abandon the attempt: nothing has moved yet, and an
+     * unrecorded call is exactly what this table exists to prevent. It throws.
+     *
+     * finish() runs AFTER. By then the remote outcome is a fact in someone
+     * else's database, and this row is only our note about it. Letting the note
+     * throw put the failure in the WRONG PLACE twice over. In the success path
+     * a captured payment whose journal write failed came back to the caller as
+     * "the capture failed", so the shop believed the money had not moved when
+     * it had. In the failure path the write threw a fresh SQLException over the
+     * original one, discarding the diagnosis at the exact moment it mattered,
+     * and a dead database is the likeliest reason the local step failed at all.
+     *
+     * So a lost note degrades this table, and the reconciler is what covers
+     * that: it compares the two services and does not consult this journal to
+     * do it. A lost note must never degrade the answer the caller acts on.
+     *
+     * @return true when the note landed, for callers that want to know
+     */
+    public static boolean finish(UUID orderId, String action, State state, String detail) {
+        try {
+            write(orderId, action, state, detail);
+            return true;
+        } catch (SQLException e) {
+            // Nowhere to escalate: raising it here is precisely the bug above.
+            // Visible on stderr, and the reconciler still catches the money.
+            System.err.println("remote_steps: could not record " + action + " for order "
+                    + orderId + " as " + state.wire() + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static void write(UUID orderId, String action, State state, String detail)
             throws SQLException {
         try (Connection c = Db.open();
              PreparedStatement ps = c.prepareStatement(

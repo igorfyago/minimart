@@ -142,11 +142,9 @@ public final class Checkout {
             // and the reconciler is what settles it.
             boolean neverLanded = e instanceof java.net.ConnectException
                     || e instanceof java.net.http.HttpConnectTimeoutException;
-            try {
-                RemoteSteps.finish(orderId, RemoteSteps.AUTHORIZE,
-                        neverLanded ? RemoteSteps.State.FAILED : RemoteSteps.State.UNKNOWN,
-                        e.getClass().getSimpleName() + ": " + e.getMessage());
-            } catch (SQLException ignored) {}
+            RemoteSteps.finish(orderId, RemoteSteps.AUTHORIZE,
+                    neverLanded ? RemoteSteps.State.FAILED : RemoteSteps.State.UNKNOWN,
+                    e.getClass().getSimpleName() + ": " + e.getMessage());
             try { Orders.abort(orderId, businessAt); } catch (SQLException ignored) {}
             return new Rejected("payment unreachable: " + e.getClass().getSimpleName());
         }
@@ -185,6 +183,9 @@ public final class Checkout {
             // THE MONEY IS ALREADY GONE and the goods are still here. Say so,
             // durably, and let the failure keep travelling: a caller told
             // "shipped" would be the second lie on top of the first.
+            // finish() cannot throw, so the original failure is what the caller
+            // sees. It is the one that says WHY the money is gone and the goods
+            // are not, and it used to be replaceable by a second database error.
             RemoteSteps.finish(orderId, RemoteSteps.FULFIL, RemoteSteps.State.FAILED,
                     "captured, then the local fulfil failed: " + e.getMessage());
             throw e;
