@@ -6,7 +6,9 @@ import dev.minimart.commerce.Orders;
 import dev.minimart.commerce.Reconciler;
 import dev.minimart.commerce.RemoteSteps;
 import dev.minimart.commerce.ReservationSweeper;
+import dev.minimart.commerce.Undeliverable;
 import dev.minimart.core.Db;
+import dev.minimart.core.EventRuntime;
 import dev.minimart.core.Ledger;
 import dev.minimart.core.Migrate;
 import dev.minipay.PayApi;
@@ -81,7 +83,8 @@ class SeamLessonTest {
         Checkout.voidSabotage = false;
         Checkout.fulfilSabotage = false;
         try (Connection c = Db.open(); var st = c.createStatement()) {
-            st.execute("TRUNCATE remote_steps, outbox, handled_events, reservations, orders, entries, "
+            st.execute("TRUNCATE refund_cases, dead_letters, event_retries, remote_steps, outbox, "
+                     + "handled_events, reservations, orders, entries, "
                      + "transactions, accounts, variants, tenants RESTART IDENTITY CASCADE");
             st.execute("INSERT INTO tenants(slug) VALUES ('" + TENANT + "')");
             st.execute("INSERT INTO variants(id, tenant, title, price) VALUES ('" + VARIANT
@@ -438,7 +441,79 @@ class SeamLessonTest {
         }
     }
 
+    /**
+     * LESSON 8 · THE SAGA'S TERMINAL STATE IS STILL A STATE, AND THE TRUTH
+     * TABLE HAS TO KNOW IT.
+     *
+     * A card order captured, shipped, and then failed by freight ends as
+     * 'undeliverable' with the capture still standing at minipay. The
+     * compensation was honest about it · goods restocked, refund case opened
+     * with status 'due' · but a truth table that never heard of
+     * 'undeliverable' fell through to null and filed the pair as HEALTHY.
+     * The customer paid for a parcel that never left, and the one audit built
+     * to see across the seam said the two services agreed.
+     *
+     * The refund case is the other half of the lesson: it is minimart's own
+     * record that the debt is known and, eventually, that it was paid. An
+     * open case keeps the discrepancy on the report; a settled one clears it,
+     * because a reconciler that keeps shouting about money a human already
+     * moved is a reconciler nobody reads, which lesson 5 already named.
+     */
+    @Test
+    void lesson8_an_undeliverable_order_with_a_standing_capture_is_named_until_settled() throws Exception {
+        UUID orderId = UUID.randomUUID();
+        assertInstanceOf(Checkout.Placed.class, Checkout.place(orderId, TENANT, 71L, VARIANT, LOC, 1, T0));
+        assertTrue(Checkout.ship(orderId, LATER), "captured there, fulfilled here");
+
+        // freight fails the shipment and the shop compensates what is its to
+        // move: the goods. The card money stays standing at the processor.
+        EventRuntime runtime = new EventRuntime(
+                Undeliverable.TOPIC_SHIPMENTS, Undeliverable.CONSUMER, Undeliverable::onShipmentFailed);
+        assertEquals(EventRuntime.Result.HANDLED,
+                runtime.apply("shipment.failed:l8", shipmentFailed(orderId), LATER));
+
+        try (Connection c = Db.open()) {
+            assertEquals("undeliverable", orderState(c, orderId));
+            assertEquals(100, Ledger.balance(c, Orders.onHand(LOC, VARIANT)).intValueExact(),
+                    "the goods came back");
+        }
+        try (Connection c = PayDb.open()) {
+            assertEquals(0, new BigDecimal("40.00").compareTo(
+                            Ledger.balance(c, dev.minipay.Settlements.receivable(TENANT))),
+                    "and the customer's money did not");
+        }
+
+        // the pair 'undeliverable' / 'succeeded' is money in the wrong place,
+        // and the report says so instead of falling through to healthy
+        Reconciler.Report r = Reconciler.run(TENANT, 100);
+        assertFalse(r.agreed(), "goods returned, money kept: the services do not agree");
+        assertEquals(1, r.discrepancies().size());
+        Reconciler.Discrepancy d = r.discrepancies().get(0);
+        assertEquals(Reconciler.Kind.UNDELIVERABLE_BUT_CAPTURED, d.kind());
+        assertEquals(orderId, d.orderId());
+
+        // a settler pays the debt V12 taught the table to record, and the
+        // discrepancy clears: the report tracks the CASE, not the state pair
+        try (Connection c = Db.open(); PreparedStatement ps = c.prepareStatement(
+                "UPDATE refund_cases SET status = 'settled', settled_at = now(), settled_by = ? "
+                + "WHERE order_id = ? AND status = 'due'")) {
+            ps.setString(1, "lesson8");
+            ps.setObject(2, orderId);
+            assertEquals(1, ps.executeUpdate(), "the case was open, and now it is not");
+        }
+        assertTrue(Reconciler.run(TENANT, 100).agreed(),
+                "a settled refund is an ending, not a discrepancy");
+        System.out.println("lesson 8: " + d);
+    }
+
     // ------------------------------------------------------------------ helpers
+
+    /** Byte-for-byte the shape freight's terminal() announces. */
+    private static String shipmentFailed(UUID orderId) {
+        return "{\"type\":\"shipment.failed\",\"eventKey\":\"shipment.failed:" + orderId
+                + "\",\"shipmentId\":\"" + UUID.randomUUID() + "\",\"orderId\":\"" + orderId
+                + "\",\"reason\":\"every onboarded carrier rejected the parcel\",\"at\":\"" + LATER + "\"}";
+    }
 
     /**
      * A proxy that does the work and loses the receipt.

@@ -66,6 +66,14 @@ public final class Reconciler {
         ABORTED_HOLD_STANDING,
         /** Cancelled here, CAPTURED there. The customer paid for nothing. */
         ABORTED_BUT_CAPTURED,
+        /** Undeliverable here, still captured there, and the refund case is
+         *  still open. The saga's terminal state: the goods came back on the
+         *  shelf, the customer's money did not come back to the customer.
+         *  Undeliverable.onShipmentFailed already named this debt as a
+         *  refund_cases row, so unlike every other kind here the fix is not
+         *  missing · it is WAITING, and this line is what keeps it visible
+         *  until a rail or a human settles the case. */
+        UNDELIVERABLE_BUT_CAPTURED,
         /** Captured there, never fulfilled here. Paid for goods on the shelf.
          *  This is the capture whose local half failed. */
         CAPTURED_NOT_FULFILLED,
@@ -140,7 +148,11 @@ public final class Reconciler {
             seen.put(intentId, true);
             String status = statusOf(intentId);
             if (status == null) { unreachable++; continue; }     // asked, not answered
-            Kind kind = classify(o.state(), status, o.intentId() != null);
+            // The refund case is only consulted for the one state whose truth
+            // table needs it. A query per order would be paid on every row for
+            // an answer only 'undeliverable' ever reads.
+            boolean settled = "undeliverable".equals(o.state()) && refundSettled(o.id());
+            Kind kind = classify(o.state(), status, o.intentId() != null, settled);
             if (kind != null) found.add(new Discrepancy(kind, o.id(), intentId,
                     o.state(), status, journalNote(o.id())));
         }
@@ -175,7 +187,8 @@ public final class Reconciler {
      * null means the pair is legitimate. Everything else is money in a position
      * neither service can notice on its own.
      */
-    static Kind classify(String orderState, String intentStatus, boolean intentRecorded) {
+    static Kind classify(String orderState, String intentStatus, boolean intentRecorded,
+                         boolean refundSettled) {
         return switch (orderState) {
             case "reserved" -> switch (intentStatus) {
                 case "requires_capture" -> null;                       // healthy: authorised, awaiting the outcome
@@ -198,6 +211,19 @@ public final class Reconciler {
                 case "requires_capture" -> Kind.ABORTED_HOLD_STANDING;
                 case "succeeded"        -> Kind.ABORTED_BUT_CAPTURED;
                 default                 -> null;
+            };
+            case "undeliverable" -> switch (intentStatus) {
+                // The compensation's own books are already square: the goods
+                // came back in the same commit that renamed the order. What can
+                // still be wrong lives at the processor, where the capture for
+                // a parcel that never left keeps standing until somebody moves
+                // it. A settled refund case is that somebody, on the record ·
+                // the debt was paid, so the pair stops being a discrepancy.
+                // An OPEN case is precisely what this report exists to keep in
+                // front of an operator: naming the debt was Undeliverable's
+                // job, and refusing to forget it is this one's.
+                case "succeeded" -> refundSettled ? null : Kind.UNDELIVERABLE_BUT_CAPTURED;
+                default          -> null;
             };
             default -> null;
         };
@@ -332,6 +358,23 @@ public final class Reconciler {
         if (intentId == null || !intentId.startsWith("pi_")) return null;
         try { return UUID.fromString(intentId.substring(3)); }
         catch (IllegalArgumentException e) { return null; }
+    }
+
+    /**
+     * True only when a refund case for this order says 'settled': the due
+     * money moved, and the row names who moved it. Anything less · no row,
+     * 'due', even 'refunded' · leaves the discrepancy standing, because for a
+     * card order 'refunded' is not a status this shop can honestly have
+     * written: the capture lives at the processor and only a settler clears it.
+     */
+    private static boolean refundSettled(UUID orderId) throws SQLException {
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement("SELECT status FROM refund_cases WHERE order_id = ?")) {
+            ps.setObject(1, orderId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && "settled".equals(rs.getString(1));
+            }
+        }
     }
 
     private static boolean orderExists(UUID orderId) throws SQLException {
