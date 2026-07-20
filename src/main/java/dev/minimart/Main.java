@@ -33,20 +33,30 @@ public final class Main {
         int payPort = Integer.parseInt(System.getenv().getOrDefault("MINIPAY_PORT", "8082"));
 
         int analyticsPort = Integer.parseInt(System.getenv().getOrDefault("ANALYTICS_PORT", "8083"));
+        int freightPort = Integer.parseInt(System.getenv().getOrDefault("MINIFREIGHT_PORT", "8084"));
+        int carrierPort = Integer.parseInt(System.getenv().getOrDefault("CARRIERS_PORT", "8085"));
 
         Migrate.bootstrap();
         PayDb.bootstrap();
         AnalyticsDb.bootstrap();
+        dev.minifreight.FreightDb.bootstrap();
         seedDemoCatalog();
 
         PayApi.start(payPort);
         MartApi.start(martPort);
         AnalyticsApi.start(analyticsPort);
-        startEventPipeline();
+        dev.minifreight.FreightApi.start(freightPort);
+        // The carriers are the outside world, booted here the way the seeded
+        // customers are: simulated parties with no privileged path. Freight
+        // reaches them by HTTP and they answer with signed webhooks, and
+        // nothing in this JVM shortcuts either leg.
+        dev.minifreight.CarrierSim.start(carrierPort, "http://localhost:" + freightPort);
+        startEventPipeline(carrierPort);
 
         System.out.println("minipay      (processor) up: http://localhost:" + payPort + "/v1/payment_intents");
         System.out.println("minimart     (merchant)  up: http://localhost:" + martPort + "/api/catalog");
         System.out.println("minianalytics(reporting) up: http://localhost:" + analyticsPort + "/api/analytics/mrr");
+        System.out.println("minifreight  (logistics) up: http://localhost:" + freightPort + "/api/freight/audit");
         Thread.currentThread().join();
     }
 
@@ -60,7 +70,7 @@ public final class Main {
      * because a reporting pipeline is down would be a worse system, not a
      * stricter one.
      */
-    private static void startEventPipeline() {
+    private static void startEventPipeline(int carrierPort) {
         String kafka = System.getenv().getOrDefault("MINIMART_KAFKA", "");
         if (kafka.isBlank()) {
             System.out.println("kafka: not configured, events will queue in the outbox");
@@ -77,7 +87,15 @@ public final class Main {
                         dev.minimart.commerce.Orders.TOPIC_ORDERS,
                         dev.minimart.commerce.Replenishment.CONSUMER,
                         dev.minimart.commerce.Replenishment::onOrderPlaced).runLoop(2000);
-                System.out.println("kafka: relay, analytics and replenishment consumers running against " + kafka);
+                // Freight is the second proof of the same argument: shipping
+                // arrived in this estate without one line of checkout changing.
+                // Its consumer claims on its own books, its relay ships its own
+                // outbox, and its driver walks the carrier saga.
+                new dev.minifreight.FreightConsumer(kafka,
+                        dev.minimart.commerce.Orders.TOPIC_ORDERS).runLoop();
+                new dev.minifreight.FreightRelay(kafka).runLoop(1000);
+                new dev.minifreight.FreightDriver("http://localhost:" + carrierPort).runLoop(2000);
+                System.out.println("kafka: relay, analytics, replenishment and freight consumers running against " + kafka);
             } catch (Exception e) {
                 System.out.println("kafka: unavailable (" + e.getMessage() + "), events queue in the outbox");
             }
