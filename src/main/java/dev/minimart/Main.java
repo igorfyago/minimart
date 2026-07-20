@@ -95,6 +95,13 @@ public final class Main {
                         dev.minimart.commerce.Orders.TOPIC_ORDERS).runLoop();
                 new dev.minifreight.FreightRelay(kafka).runLoop(1000);
                 new dev.minifreight.FreightDriver("http://localhost:" + carrierPort).runLoop(2000);
+                // And the saga's return leg: when freight fails a shipment,
+                // the MERCHANT compensates on its own books · goods restocked,
+                // wallet money returned, card money recorded as owed.
+                new dev.minimart.core.EventConsumer(kafka,
+                        dev.minimart.commerce.Undeliverable.TOPIC_SHIPMENTS,
+                        dev.minimart.commerce.Undeliverable.CONSUMER,
+                        dev.minimart.commerce.Undeliverable::onShipmentFailed).runLoop(2000);
                 System.out.println("kafka: relay, analytics, replenishment and freight consumers running against " + kafka);
             } catch (Exception e) {
                 System.out.println("kafka: unavailable (" + e.getMessage() + "), events queue in the outbox");

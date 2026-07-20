@@ -43,6 +43,7 @@ public final class FreightApi {
 
     public static HttpServer start(int port) throws IOException {
         HttpServer s = HttpServer.create(new InetSocketAddress(port), 0);
+        s.createContext("/", FreightApi::console);
         s.createContext("/webhooks/carrier/", FreightApi::webhook);
         s.createContext("/api/shipments", FreightApi::shipments);
         s.createContext("/api/freight/audit", FreightApi::audit);
@@ -50,6 +51,20 @@ public final class FreightApi {
         s.setExecutor(java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor());
         s.start();
         return s;
+    }
+
+    /** The console, served by freight itself: the estate's rule is that each
+     *  service answers for its own tab, so the page that says where a parcel
+     *  is comes from the service that actually knows. */
+    private static void console(HttpExchange x) throws IOException {
+        if (!"/".equals(x.getRequestURI().getPath())) { respond(x, 404, "{}"); return; }
+        try (var in = FreightApi.class.getResourceAsStream("/web_freight/console.html")) {
+            if (in == null) { respond(x, 404, "{}"); return; }
+            byte[] page = in.readAllBytes();
+            x.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+            x.sendResponseHeaders(200, page.length);
+            try (OutputStream os = x.getResponseBody()) { os.write(page); }
+        }
     }
 
     // ------------------------------------------------------------- webhooks

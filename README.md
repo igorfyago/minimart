@@ -2,7 +2,7 @@
 
 **A subscription-commerce platform whose customers are software.** Raw Java 21, no frameworks.
 
-Three services, three PostgreSQL databases, one Kafka cluster, and no query that crosses between them:
+Four services, four PostgreSQL databases, one Kafka cluster, and no query that crosses between them:
 
 - **minimart**, the merchant. Orders, inventory and subscriptions, with a billing engine that runs a dunning
   ladder in business time. Inventory is a second double-entry ledger sharing the same tables, so "do not
@@ -11,6 +11,10 @@ Three services, three PostgreSQL databases, one Kafka cluster, and no query that
   idempotency layer that distinguishes a retry from a conflicting reuse from a call still in flight.
 - **minianalytics**, the reporting service. Owns no goods and no money, learns everything it knows from the event
   stream, and stores MRR as a ledger of movements rather than a total anyone can overwrite.
+- **minifreight**, the logistics arm. Learns an order exists from the topic, gets a shipping label from simulated
+  external carriers over HTTP, and runs the fulfilment saga: journaled carrier calls, HMAC-signed tracking
+  webhooks, and a driver that never re-fires an unknown outcome blind. When every carrier says no, it says so on
+  its own topic, and the merchant compensates on its own books.
 
 The customers are software too: a seeded population drives the same public HTTP API a browser would, with no
 privileged path for the simulation, while a compressed clock runs months past in seconds.
@@ -238,9 +242,30 @@ Each subscription is now its own failure domain, and the guard is careful about 
   for a warehouse mistake.
 - *a genuine decline still duns*, so the guard did not make the system soft.
 
+**minifreight · the fulfilment saga against carriers that misbehave on purpose (done, 8 + 4 lessons green).** A
+fourth service with its own database, learning about orders only from the topic and reaching carriers only over
+HTTP. Two simulated carriers are the point: one is reliable and picky, the other writes the shipping label and
+THEN returns 500, delivers every webhook twice, and can go entirely silent. What that forces the driver to be:
+
+- *an unknown outcome freezes the carrier ladder* · falling to the next carrier on a timeout is how one parcel
+  ships twice on two paid labels, so the driver asks the quiet carrier what it actually did, and **adopts** the
+  label that secretly exists rather than minting another.
+- *one door for every report* · webhooks and polls funnel through a single monotonic transition, minting the same
+  event key for the same fact, so a duplicate is absorbed, a stale report cannot undeliver a parcel, and a
+  decided shipment is nobody's to reopen.
+- *webhooks are HMAC-signed and verified in constant time* · a forged "delivered" is a forged business event.
+- *bounded attempts end at a person* · five unknowable passes park the shipment as `stuck`, announced by event,
+  with a repair endpoint that only moves stuck shipments and journals who moved them.
+
+**The compensation leg (done, 4/4 lessons green).** When freight fails a shipment aloud, the merchant reacts on
+its own books: `sold` becomes on-hand again, wallet money returns to the customer **in the same commit**, and
+card money · which stands at the processor, where no refund rail exists yet · becomes a `refund_cases` row with
+the intent id and status `due`. A debt the books can name beats a payment improvised through an API that does not
+exist. The audits are asserted healthy at the end of the exchange, not assumed.
+
 ### Next
 - **agentic-visitors**, a separate service: customers whose decisions come from a language model rather than a
   seed, with the spend as a double-entry ledger so "cannot overspend" is the same non-negative CHECK as "cannot
   oversell", and recorded decisions so a run can be replayed without calling the model again.
-- **The order saga over Kafka**, so fulfilment stops being synchronous.
+- **A refund rail in minipay**, so the `due` cases can settle without a human.
 - **Cohort analytics**, and **experiments** with A/A calibration before any readout is believed.
