@@ -197,6 +197,13 @@
     </div>
 
     <div class="card" style="margin-top:16px">
+      <h2>Your orders</h2>
+      <div class="sub">What happened after you paid · the parcel's journey, answered live by the
+        logistics service, and the money's journey when a parcel could not go.</div>
+      <div id="myorders"><div class="muted">nothing yet · buy something above</div></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
       <h2>What a purchase actually does</h2>
       <div class="sub">Reserves stock in one database and authorises money in another, over HTTP, then
         captures on shipment. No money you own is ever involved.</div>
@@ -307,7 +314,20 @@
 const $ = s => document.querySelector(s);
 const money = v => '€' + Number(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
 const uuid = () => crypto.randomUUID();
-let CUSTOMER = 7000 + Math.floor(Math.random() * 2000);
+// You stay you. This id used to be re-rolled on every reload, which made
+// "your orders" impossible by construction: nobody existed for longer than
+// one page view. The anonymous you is minted once and kept by this browser;
+// signing in through the estate bar replaces it with the real you, because
+// the server lets the token beat whatever number the page sends.
+let CUSTOMER = Number(localStorage.getItem('mart_customer')) || 0;
+if (!CUSTOMER) {
+  CUSTOMER = 7000 + Math.floor(Math.random() * 2000);
+  localStorage.setItem('mart_customer', String(CUSTOMER));
+}
+const authHeaders = () => {
+  const t = localStorage.getItem('b4rruf3t_token');
+  return t ? {'Authorization': 'Bearer ' + t} : {};
+};
 
 const refresh = document.querySelector('#refresh-shop');
 if (refresh) refresh.onclick = () => loadProducts();
@@ -389,17 +409,82 @@ async function buy(variant, btn) {
   const orderId = uuid();
   try {
     const r = await fetch('/api/checkout', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json', ...authHeaders()},
       body: JSON.stringify({orderId, tenant: 'helix', customer: String(CUSTOMER), variant, location: 'MAD', qty: 1})
     }).then(r => r.json());
     if (r.error) { toast('Declined: ' + r.error); }
     else {
-      btn.textContent = 'Shipping…';
+      btn.textContent = 'Paying…';
       await fetch('/api/orders/' + orderId + '/ship', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
-      toast('Bought and shipped. Money captured at the processor.');
+      toast('Paid. Watch it ship under Your orders.');
     }
   } catch (e) { toast('Something went wrong: ' + e.message); }
-  loadProducts();
+  loadProducts(); loadMyOrders();
+}
+
+// ---- your orders: the order from our books, the parcel from freight's ----
+
+const PARCEL_STEPS = ['requested', 'labelled', 'in_transit', 'delivered'];
+const PARCEL_WORDS = {requested: 'preparing', labelled: 'label printed', in_transit: 'on its way', delivered: 'delivered'};
+
+// The buyer's sentence for each state. The raw states are an engineer's
+// vocabulary; nobody who just bought sleep supplements should have to learn
+// what 'fulfilled' means to a ledger.
+function buyerLine(o) {
+  const s = o.shipment && o.shipment.state;
+  if (o.state === 'reserved') return ['Processing payment', 'var(--amber)'];
+  if (o.state === 'aborted') return ['Cancelled · nothing charged', 'var(--dim)'];
+  if (o.state === 'undeliverable') {
+    return o.refund === 'refunded'
+      ? ['Could not be delivered · refunded', 'var(--red)']
+      : ['Could not be delivered · refund on its way', 'var(--red)'];
+  }
+  if (o.state === 'fulfilled') {
+    if (s === 'delivered') return ['Delivered', 'var(--green)'];
+    if (s === 'in_transit') return ['On its way · ' + (o.shipment.tracking || ''), 'var(--accent)'];
+    if (s === 'labelled') return ['Label printed at ' + (o.shipment.carrier || 'the carrier'), 'var(--accent)'];
+    if (s === 'failed' || s === 'stuck') return ['Delivery problem · we are on it', 'var(--red)'];
+    return ['Paid · preparing your parcel', 'var(--accent)'];
+  }
+  return [o.state, 'var(--dim)'];
+}
+
+function parcelTimeline(sh) {
+  if (!sh || !PARCEL_STEPS.includes(sh.state)) return '';
+  const rank = PARCEL_STEPS.indexOf(sh.state);
+  return '<div style="display:flex;gap:6px;align-items:center;margin-top:8px">'
+    + PARCEL_STEPS.map((st, i) => {
+        const on = i <= rank;
+        return '<span style="display:inline-flex;align-items:center;gap:6px">'
+          + '<span class="dot" style="background:' + (on ? 'var(--accent)' : 'var(--line)') + '"></span>'
+          + '<span class="sub" style="margin:0;color:' + (on ? 'var(--text)' : 'var(--dim)') + '">'
+          + PARCEL_WORDS[st] + '</span></span>'
+          + (i < PARCEL_STEPS.length - 1 ? '<span style="width:14px;height:1px;background:var(--line)"></span>' : '');
+      }).join('')
+    + '</div>';
+}
+
+async function loadMyOrders() {
+  const el = $('#myorders');
+  if (!el) return;
+  try {
+    const d = await fetch('/api/my/orders?customer=' + CUSTOMER, {headers: authHeaders()}).then(r => r.json());
+    if (d.error) { el.innerHTML = '<div class="muted">' + d.error + '</div>'; return; }
+    if (!d.orders.length) { el.innerHTML = '<div class="muted">nothing yet · buy something above</div>'; return; }
+    el.innerHTML = d.orders.map(o => {
+      const [line, color] = buyerLine(o);
+      return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
+        + '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">'
+        + '<b>' + o.title + '</b>'
+        + '<span class="mono" style="color:' + color + '">' + line + '</span></div>'
+        + '<div class="sub" style="margin:2px 0 0">' + money(o.amount)
+        + ' · order <span class="mono">' + o.id.slice(0, 8) + '</span></div>'
+        + parcelTimeline(o.shipment)
+        + '</div>';
+    }).join('')
+    + (d.tracking === 'unavailable'
+        ? '<div class="muted" style="margin-top:8px">tracking is catching its breath · your orders are safe, the parcel view will return</div>' : '');
+  } catch (e) { /* the shop stays a shop even when this card cannot load */ }
 }
 
 async function loadOps() {
@@ -458,8 +543,12 @@ $('#run').onclick = async () => {
 };
 
 loadProducts();
+loadMyOrders();
 loadOps();
 setInterval(loadOps, 3000);
+// the parcel view keeps itself honest: freight moves parcels whether or not
+// this tab is watching, so the card re-asks politely rather than on click
+setInterval(() => { if (!$('#shop').classList.contains('hidden')) loadMyOrders(); }, 4000);
 
 // ---------------------------------------------------------------- REVENUE
 // Every call below crosses into a DIFFERENT SERVICE with a different database.

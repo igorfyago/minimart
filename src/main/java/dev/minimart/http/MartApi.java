@@ -60,6 +60,7 @@ public final class MartApi {
         s.createContext("/api/audit", MartApi::audit);
         s.createContext("/api/reconcile", MartApi::reconcile);
         s.createContext("/api/stats", MartApi::stats);
+        s.createContext("/api/my/orders", MartApi::myOrders);
         s.createContext("/api/orders/recent", MartApi::recentOrders);
         s.createContext("/api/stock/levels", MartApi::stockLevels);
         s.createContext("/api/subscriptions", MartApi::subscriptions);
@@ -368,6 +369,99 @@ public final class MartApi {
         } catch (Exception e) {
             send(ex, 500, err(e));
         }
+    }
+
+    /** Where the parcel answers come from. Overridable for the same reason
+     *  Checkout.payBaseUrl is: a test points it at a freight that is not there. */
+    public static volatile String freightBaseUrl =
+            System.getenv().getOrDefault("MINIFREIGHT_URL", "http://localhost:8084");
+
+    private static final java.net.http.HttpClient freightHttp = java.net.http.HttpClient.newBuilder()
+            .connectTimeout(java.time.Duration.ofMillis(800)).build();
+
+    /**
+     * THE BUYER'S OWN VIEW · one answer for "what did I order, and where is it".
+     *
+     * The shop composes it the way it composes everything: from its own books,
+     * plus one HTTP question per shipped order to the service that actually
+     * knows where the parcel is. Freight being down costs the tracking column
+     * and nothing else: the orders still answer, and the flag at the end lets
+     * the page say "tracking unavailable" instead of pretending the parcel is
+     * nowhere. The refund column comes from the shop's own refund cases, so an
+     * undeliverable order can say which of the two true things happened to the
+     * money · returned already, or owed and named.
+     *
+     * Identity beats the query string, same as everywhere on this surface: an
+     * anonymous shopper names a customer number, a signed-in one IS one.
+     */
+    private static void myOrders(HttpExchange ex) throws IOException {
+        try {
+            String customer = param(ex, "customer");
+            var identified = identity.customerFor(ex.getRequestHeaders().getFirst("Authorization"));
+            if (identified.isPresent()) customer = String.valueOf(identified.get());
+            if (customer == null) { send(ex, 400, "{\"error\":\"a token, or ?customer=\"}"); return; }
+
+            record Row(String id, String title, long qty, java.math.BigDecimal amount,
+                       String state, String refund, String at) {}
+            java.util.List<Row> rows = new java.util.ArrayList<>();
+            try (Connection c = Db.open();
+                 PreparedStatement ps = c.prepareStatement("""
+                        SELECT o.id, v.title, o.qty, o.amount, o.state, rc.status, o.business_at
+                        FROM orders o JOIN variants v ON v.id = o.variant_id
+                        LEFT JOIN refund_cases rc ON rc.order_id = o.id
+                        WHERE o.customer_id = ? ORDER BY o.business_at DESC, o.id LIMIT 20""")) {
+                ps.setLong(1, Long.parseLong(customer));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) rows.add(new Row(rs.getString(1), rs.getString(2), rs.getLong(3),
+                            rs.getBigDecimal(4), rs.getString(5), rs.getString(6),
+                            rs.getTimestamp(7).toInstant().toString()));
+                }
+            }
+
+            boolean freightAnswering = true;
+            StringBuilder b = new StringBuilder("{\"orders\":[");
+            boolean first = true;
+            for (Row r : rows) {
+                if (!first) b.append(',');
+                first = false;
+                b.append("{\"id\":\"").append(r.id())
+                        .append("\",\"title\":\"").append(Json.esc(r.title()))
+                        .append("\",\"qty\":").append(r.qty())
+                        .append(",\"amount\":\"").append(r.amount().stripTrailingZeros().toPlainString())
+                        .append("\",\"state\":\"").append(r.state())
+                        .append("\",\"refund\":").append(r.refund() == null ? "null" : "\"" + r.refund() + "\"")
+                        .append(",\"at\":\"").append(r.at()).append("\"");
+                String shipment = null;
+                if (freightAnswering && ("fulfilled".equals(r.state()) || "undeliverable".equals(r.state()))) {
+                    try {
+                        shipment = askFreight(r.id());
+                    } catch (Exception unreachable) {
+                        freightAnswering = false;   // one refusal is enough; stop asking
+                    }
+                }
+                b.append(",\"shipment\":").append(shipment == null ? "null" : shipment).append('}');
+            }
+            b.append("],\"tracking\":\"").append(freightAnswering ? "live" : "unavailable").append("\"}");
+            send(ex, 200, b.toString());
+        } catch (NumberFormatException e) {
+            send(ex, 400, "{\"error\":\"customer is a number\"}");
+        } catch (Exception e) {
+            send(ex, 500, err(e));
+        }
+    }
+
+    /** Freight's own JSON for this order, embedded verbatim · it is estate
+     *  JSON with escaped fields, not foreign input. null means freight has no
+     *  shipment for the order, which for a fresh 'fulfilled' simply means the
+     *  consumer has not caught up yet. Unreachable throws, and the caller
+     *  degrades the whole answer honestly rather than per-row. */
+    private static String askFreight(String orderId) throws Exception {
+        java.net.http.HttpResponse<String> r = freightHttp.send(
+                java.net.http.HttpRequest.newBuilder(java.net.URI.create(
+                                freightBaseUrl + "/api/shipments?order=" + orderId))
+                        .timeout(java.time.Duration.ofMillis(900)).GET().build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+        return r.statusCode() == 200 ? r.body() : null;
     }
 
     /** /api/orders/{id} · GET, or POST {id}/ship, {id}/cancel */
