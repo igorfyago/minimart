@@ -104,14 +104,31 @@ public final class FreightDriver {
 
     private record Work(UUID id, String state, long qty, String destination, int attempts) {}
 
+    /**
+     * Two queues, not one, and the split is a scar. The first version took
+     * the oldest fifty of ANY open state, and the first backlog broke it in
+     * production shape: fifty labelled parcels, all older than every parcel
+     * still waiting for a label, filled the set on every pass and were polled
+     * forever while a thousand requested shipments aged behind them. Nothing
+     * erred. The audit's oldest-open number just climbed, which is exactly
+     * what that number is for. So label work and poll work each get half the
+     * pass · the backlog drains while parcels in flight are still watched,
+     * and the poll half takes the STALEST first, because the parcel not asked
+     * about for longest is the one whose silence is oldest.
+     */
     private List<Work> needingAttention() throws SQLException {
         List<Work> out = new ArrayList<>();
         try (Connection c = FreightDb.open();
              PreparedStatement ps = c.prepareStatement("""
-                SELECT id, state, qty, destination, attempts FROM shipments
-                WHERE state IN ('requested', 'labelled', 'in_transit')
-                  AND (claimed_until IS NULL OR claimed_until < now())
-                ORDER BY created_at LIMIT 50""")) {
+                (SELECT id, state, qty, destination, attempts FROM shipments
+                 WHERE state = 'requested'
+                   AND (claimed_until IS NULL OR claimed_until < now())
+                 ORDER BY created_at LIMIT 25)
+                UNION ALL
+                (SELECT id, state, qty, destination, attempts FROM shipments
+                 WHERE state IN ('labelled', 'in_transit')
+                   AND (claimed_until IS NULL OR claimed_until < now())
+                 ORDER BY updated_at LIMIT 25)""")) {
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) out.add(new Work((UUID) rs.getObject(1), rs.getString(2),
                         rs.getLong(3), rs.getString(4), rs.getInt(5)));
