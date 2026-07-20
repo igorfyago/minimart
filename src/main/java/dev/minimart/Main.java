@@ -39,24 +39,39 @@ public final class Main {
         Migrate.bootstrap();
         PayDb.bootstrap();
         AnalyticsDb.bootstrap();
-        dev.minifreight.FreightDb.bootstrap();
         seedDemoCatalog();
 
         PayApi.start(payPort);
         MartApi.start(martPort);
         AnalyticsApi.start(analyticsPort);
-        dev.minifreight.FreightApi.start(freightPort);
-        // The carriers are the outside world, booted here the way the seeded
-        // customers are: simulated parties with no privileged path. Freight
-        // reaches them by HTTP and they answer with signed webhooks, and
-        // nothing in this JVM shortcuts either leg.
-        dev.minifreight.CarrierSim.start(carrierPort, "http://localhost:" + freightPort);
-        startEventPipeline(carrierPort);
+
+        // Freight is OPTIONAL at boot, the same argument as the broker being
+        // optional below: a shop that cannot take an order because a logistics
+        // sidecar could not reach its database would be a worse system, not a
+        // stricter one. A deployment that has not configured MINIFREIGHT_* yet
+        // boots the till first and says plainly what it left out.
+        boolean freightUp = false;
+        try {
+            dev.minifreight.FreightDb.bootstrap();
+            dev.minifreight.FreightApi.start(freightPort);
+            // The carriers are the outside world, booted here the way the seeded
+            // customers are: simulated parties with no privileged path. Freight
+            // reaches them by HTTP and they answer with signed webhooks, and
+            // nothing in this JVM shortcuts either leg.
+            dev.minifreight.CarrierSim.start(carrierPort, "http://localhost:" + freightPort);
+            freightUp = true;
+        } catch (Exception e) {
+            System.out.println("minifreight: not booting (" + e.getMessage()
+                    + ") · the shop sells on; orders will ship once freight's database is reachable");
+        }
+        startEventPipeline(carrierPort, freightUp);
 
         System.out.println("minipay      (processor) up: http://localhost:" + payPort + "/v1/payment_intents");
         System.out.println("minimart     (merchant)  up: http://localhost:" + martPort + "/api/catalog");
         System.out.println("minianalytics(reporting) up: http://localhost:" + analyticsPort + "/api/analytics/mrr");
-        System.out.println("minifreight  (logistics) up: http://localhost:" + freightPort + "/api/freight/audit");
+        if (freightUp) {
+            System.out.println("minifreight  (logistics) up: http://localhost:" + freightPort + "/api/freight/audit");
+        }
         Thread.currentThread().join();
     }
 
@@ -70,7 +85,7 @@ public final class Main {
      * because a reporting pipeline is down would be a worse system, not a
      * stricter one.
      */
-    private static void startEventPipeline(int carrierPort) {
+    private static void startEventPipeline(int carrierPort, boolean freightUp) {
         String kafka = System.getenv().getOrDefault("MINIMART_KAFKA", "");
         if (kafka.isBlank()) {
             System.out.println("kafka: not configured, events will queue in the outbox");
@@ -87,22 +102,28 @@ public final class Main {
                         dev.minimart.commerce.Orders.TOPIC_ORDERS,
                         dev.minimart.commerce.Replenishment.CONSUMER,
                         dev.minimart.commerce.Replenishment::onOrderPlaced).runLoop(2000);
-                // Freight is the second proof of the same argument: shipping
-                // arrived in this estate without one line of checkout changing.
-                // Its consumer claims on its own books, its relay ships its own
-                // outbox, and its driver walks the carrier saga.
-                new dev.minifreight.FreightConsumer(kafka,
-                        dev.minimart.commerce.Orders.TOPIC_ORDERS).runLoop();
-                new dev.minifreight.FreightRelay(kafka).runLoop(1000);
-                new dev.minifreight.FreightDriver("http://localhost:" + carrierPort).runLoop(2000);
-                // And the saga's return leg: when freight fails a shipment,
-                // the MERCHANT compensates on its own books · goods restocked,
-                // wallet money returned, card money recorded as owed.
+                if (freightUp) {
+                    // Freight is the second proof of the same argument: shipping
+                    // arrived in this estate without one line of checkout changing.
+                    // Its consumer claims on its own books, its relay ships its own
+                    // outbox, and its driver walks the carrier saga.
+                    new dev.minifreight.FreightConsumer(kafka,
+                            dev.minimart.commerce.Orders.TOPIC_ORDERS).runLoop();
+                    new dev.minifreight.FreightRelay(kafka).runLoop(1000);
+                    new dev.minifreight.FreightDriver("http://localhost:" + carrierPort).runLoop(2000);
+                }
+                // The saga's return leg: when freight fails a shipment, the
+                // MERCHANT compensates on its own books · goods restocked,
+                // wallet money returned, card money recorded as owed. This
+                // consumer runs on the merchant's database, so it needs no
+                // freight boot to be correct: with freight down it simply
+                // reads an empty topic.
                 new dev.minimart.core.EventConsumer(kafka,
                         dev.minimart.commerce.Undeliverable.TOPIC_SHIPMENTS,
                         dev.minimart.commerce.Undeliverable.CONSUMER,
                         dev.minimart.commerce.Undeliverable::onShipmentFailed).runLoop(2000);
-                System.out.println("kafka: relay, analytics, replenishment and freight consumers running against " + kafka);
+                System.out.println("kafka: relay, analytics, replenishment"
+                        + (freightUp ? ", freight" : "") + " and undeliverable consumers running against " + kafka);
             } catch (Exception e) {
                 System.out.println("kafka: unavailable (" + e.getMessage() + "), events queue in the outbox");
             }
