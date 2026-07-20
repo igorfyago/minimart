@@ -81,7 +81,8 @@ class FreightLessonTest {
 
         assertTrue(FreightConsumer.apply("order.fulfilled:" + orderId, payload));
         assertFalse(FreightConsumer.apply("order.fulfilled:" + orderId, payload), "the same delivery must be a no-op");
-        FreightConsumer.apply("order.fulfilled:" + orderId + ":replayed", payload);
+        assertTrue(FreightConsumer.apply("order.fulfilled:" + orderId + ":replayed", payload),
+                "a fresh key is a genuinely new claim, even when the order is not");
 
         assertEquals(1, count("SELECT COUNT(*) FROM shipments WHERE order_id = '" + orderId + "'"));
     }
@@ -203,6 +204,8 @@ class FreightLessonTest {
         assertEquals("labelled", stateOf(shipmentId));
         assertEquals(0, count("SELECT COUNT(*) FROM tracking_events WHERE shipment_id = '" + shipmentId
                 + "' AND status <> 'labelled'"), "the forgery must leave no trace but the label it failed to move");
+        assertEquals(0, count("SELECT COUNT(*) FROM outbox WHERE event_key = 'shipment.delivered:" + shipmentId
+                + "'"), "and no half-applied announcement either: the outbox is part of the same refusal");
     }
 
     /**
@@ -264,11 +267,48 @@ class FreightLessonTest {
         HttpResponse<String> refused = resolve(UUID.randomUUID(), "failed");
         assertTrue(refused.statusCode() >= 400, "resolving a shipment that does not exist must refuse");
 
+        // While it sits stuck, a carrier report cannot decide it either: the
+        // machine refuses through the same door everything else uses. Without
+        // the terminal guard in advance(), stuck ranks below every parcel
+        // status and a signed webhook would march it to delivered, past the
+        // human the state exists to summon.
+        try (Connection c = FreightDb.open()) {
+            c.setAutoCommit(false);
+            assertEquals(Shipments.Advance.STALE,
+                    Shipments.advance(c, shipmentId, "swift", "SW-ghost", "delivered", "SW-ghost:delivered", T0),
+                    "a decided shipment is nobody's to reopen, not even a carrier's");
+            c.commit();
+        }
+        assertEquals("stuck", stateOf(shipmentId));
+
         HttpResponse<String> ok = resolve(shipmentId, "failed");
         assertEquals(200, ok.statusCode());
         assertEquals("failed", stateOf(shipmentId));
         assertEquals(409, resolve(shipmentId, "delivered").statusCode(),
                 "a resolved shipment is nobody's to move again");
+    }
+
+    /**
+     * LESSON 8 · A POISON EVENT COSTS ITSELF, NEVER THE PARTITION.
+     *
+     * An order.fulfilled with no orderId will not improve however often it is
+     * redelivered, and the wrong response is the obvious one: throw, abort
+     * the batch, replay, forever, with every order behind it never shipping.
+     * The consumer claims it, counts it, and steps past, and the count is on
+     * the audit endpoint because "we skipped some" must never be a secret.
+     */
+    @Test
+    void lesson8_a_poison_event_is_counted_and_stepped_past() throws Exception {
+        long before = FreightConsumer.unactionable.get();
+        String poison = "{\"type\":\"order.fulfilled\",\"eventKey\":\"order.fulfilled:poison\",\"tenant\":\""
+                + TENANT + "\",\"variant\":\"v-focus-30\",\"qty\":1,\"at\":\"" + T0 + "\"}";
+
+        assertFalse(FreightConsumer.apply("order.fulfilled:poison", poison));
+        assertEquals(before + 1, FreightConsumer.unactionable.get());
+        assertFalse(FreightConsumer.apply("order.fulfilled:poison", poison),
+                "the claim was kept, so the redelivery does not even reach the counter");
+        assertEquals(before + 1, FreightConsumer.unactionable.get());
+        assertEquals(0, count("SELECT COUNT(*) FROM shipments"));
     }
 
     // ---------------------------------------------------------------- helpers

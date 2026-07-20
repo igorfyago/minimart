@@ -137,6 +137,13 @@ public final class Shipments {
                 current = rs.getString(2);
             }
         }
+        // A DECIDED SHIPMENT IS NOBODY'S TO REOPEN. failed and stuck rank -1,
+        // which without this guard would make them rank BELOW every carrier
+        // report and reopen through the front door · a signed webhook marching
+        // a stuck shipment to delivered, past the human the stuck state exists
+        // to summon. Found by adversarial review, not by a test, which is why
+        // lesson 7 now closes with exactly this attempt.
+        if (rank(current) < 0) return Advance.STALE;
         if (rank(status) <= rank(current)) return Advance.STALE;   // history, not news
 
         try (PreparedStatement ps = c.prepareStatement("""

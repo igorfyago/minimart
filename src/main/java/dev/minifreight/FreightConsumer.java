@@ -37,6 +37,16 @@ public final class FreightConsumer {
 
     public static final String GROUP = "freight";
 
+    /** Events this consumer understood but can never act on · a shape missing
+     *  the fields a shipment requires. Claimed, counted, and stepped past,
+     *  because the alternative is head-of-line blocking: one malformed event
+     *  replayed forever, and every order behind it never shipping. Counted
+     *  rather than silent, and the mart-freight reconciliation (slice 2) is
+     *  the net that will name any paid order with no shipment, whatever the
+     *  reason it has none. */
+    public static final java.util.concurrent.atomic.AtomicLong unactionable =
+            new java.util.concurrent.atomic.AtomicLong();
+
     private final KafkaConsumer<String, String> consumer;
 
     public FreightConsumer(String bootstrap, String topic) {
@@ -73,8 +83,17 @@ public final class FreightConsumer {
                 Shipments.createFromOrder(c, payload, businessAt);
                 c.commit();
                 return true;
+            } catch (IllegalArgumentException never) {
+                // This shape will not improve with retrying: the claim is KEPT
+                // and committed, the event counted, and the partition moves.
+                // Same verdict Replenishment reaches for events it cannot act
+                // on, for the same reason: a retry loop is where a poison
+                // message hides, not where it heals.
+                unactionable.incrementAndGet();
+                c.commit();
+                return false;
             } catch (Exception e) {
-                c.rollback();     // the claim goes back with the effect it guarded
+                c.rollback();     // transient · the claim goes back with the effect it guarded
                 throw e;
             }
         }

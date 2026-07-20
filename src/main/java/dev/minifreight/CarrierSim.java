@@ -140,17 +140,24 @@ public final class CarrierSim {
         long qty = parseQty(Json.str(body, "qty"));
         if (requestId == null || requestId.isBlank()) { respond(x, 400, "{\"error\":\"requestId required\"}"); return; }
 
-        Label existing = labels.get(carrier).get(requestId);
-        if (existing != null) {   // a replay is answered, never re-done
-            respond(x, 200, Json.obj("status", "accepted", "tracking", existing.tracking()));
+        long max = SWIFT.equals(carrier) ? SWIFT_MAX_QTY : BUDGET_MAX_QTY;
+        if (labels.get(carrier).get(requestId) == null && qty > max) {
+            respond(x, 200, Json.obj("status", "rejected", "reason", "oversize for " + carrier));
             return;
         }
 
-        long max = SWIFT.equals(carrier) ? SWIFT_MAX_QTY : BUDGET_MAX_QTY;
-        if (qty > max) { respond(x, 200, Json.obj("status", "rejected", "reason", "oversize for " + carrier)); return; }
-
-        String tracking = (SWIFT.equals(carrier) ? "SW-" : "BG-") + seq.incrementAndGet();
-        labels.get(carrier).put(requestId, new Label(requestId, tracking, qty));
+        // putIfAbsent, not check-then-put: two deliveries of one request id
+        // racing each other must converge on ONE label, because this map is
+        // the idempotency a real carrier would be running, and an idempotency
+        // layer with a window in it is a lottery. The loser's tracking number
+        // is never spoken and never enters the fleet.
+        String minted = (SWIFT.equals(carrier) ? "SW-" : "BG-") + seq.incrementAndGet();
+        Label prior = labels.get(carrier).putIfAbsent(requestId, new Label(requestId, minted, qty));
+        if (prior != null) {      // a replay is answered, never re-done
+            respond(x, 200, Json.obj("status", "accepted", "tracking", prior.tracking()));
+            return;
+        }
+        String tracking = minted;
         parcels.get(carrier).put(tracking, "labelled");
 
         if (BUDGET.equals(carrier)) {

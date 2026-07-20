@@ -210,21 +210,38 @@ public final class FreightApi {
                     "SELECT COUNT(*) FROM carrier_steps WHERE state IN ('requested','unknown')");
                  ResultSet rs = ps.executeQuery()) {
                 rs.next();
-                b.append("\"steps_with_unknown_outcome\":\"").append(rs.getLong(1)).append("\"}");
+                b.append("\"steps_with_unknown_outcome\":\"").append(rs.getLong(1)).append("\",");
             }
+            b.append("\"consumer_unactionable\":\"").append(FreightConsumer.unactionable.get()).append("\"}");
             respond(x, 200, b.toString());
         } catch (Exception e) {
             respond(x, 500, "{\"error\":\"" + Json.esc(e.getMessage()) + "\"}");
         }
     }
 
-    /** POST /api/freight/shipments/{id}/resolve · the human end of 'stuck'. */
+    /** POST /api/freight/shipments/{id}/resolve · the human end of 'stuck'.
+     *
+     *  This estate's demos run without login on purpose, but a repair endpoint
+     *  is not a demo: it moves a shipment to a verdict, and downstream of one
+     *  of those verdicts money stops being owed back. So the door takes a
+     *  token when one is configured · FREIGHT_OPS_TOKEN, compared in constant
+     *  time · and the unset default is honest about being a development
+     *  posture, not a production one. */
     private static void ops(HttpExchange x) throws IOException {
         try {
             String[] p = x.getRequestURI().getPath().split("/");
             if (p.length != 6 || !"resolve".equals(p[5]) || !"POST".equals(x.getRequestMethod())) {
                 respond(x, 404, "{}");
                 return;
+            }
+            String required = env("FREIGHT_OPS_TOKEN", "");
+            if (!required.isBlank()) {
+                String given = x.getRequestHeaders().getFirst("X-Ops-Token");
+                if (given == null || !MessageDigest.isEqual(
+                        given.getBytes(StandardCharsets.UTF_8), required.getBytes(StandardCharsets.UTF_8))) {
+                    respond(x, 401, "{\"error\":\"ops token required\"}");
+                    return;
+                }
             }
             String body = new String(x.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             String verdict = Json.str(body, "verdict");

@@ -82,14 +82,15 @@ public final class FreightDriver {
     public int runOnce(Instant at) throws SQLException {
         int acted = 0;
         for (Work w : needingAttention()) {
-            if (!claim(w.id())) continue;              // another driver has it
+            Instant lease = claim(w.id());
+            if (lease == null) continue;               // another driver has it
             try {
                 switch (w.state()) {
                     case "requested" -> labelPass(w, at);
                     case "labelled", "in_transit" -> pollPass(w, at);
                 }
                 acted++;
-                release(w.id());                       // the lease guards a live
+                release(w.id(), lease);                // the lease guards a live
                                                        // attempt, not a cool-down
             } catch (Exception e) {
                 // this shipment's pass died mid-flight; the lease is left to
@@ -119,25 +120,36 @@ public final class FreightDriver {
         return out;
     }
 
-    private void release(UUID shipmentId) throws SQLException {
+    /** Fenced on the lease value this driver wrote. An unconditional release
+     *  would be the race reopened by hand: a pass that outlives its own lease
+     *  · a slow carrier, a long queue · finishes after a second driver has
+     *  legitimately claimed the row, and must not be able to null THAT
+     *  driver's lease on the way out. Releasing a lease that is no longer
+     *  ours quietly releases nothing, which is the correct amount. */
+    private void release(UUID shipmentId, Instant lease) throws SQLException {
         try (Connection c = FreightDb.open();
              PreparedStatement ps = c.prepareStatement(
-                     "UPDATE shipments SET claimed_until = NULL WHERE id = ?")) {
+                     "UPDATE shipments SET claimed_until = NULL WHERE id = ? AND claimed_until = ?")) {
             ps.setObject(1, shipmentId);
+            ps.setTimestamp(2, java.sql.Timestamp.from(lease));
             ps.executeUpdate();
         }
     }
 
     /** Compare-and-set on the lease, in its own committed step, BEFORE any
-     *  remote call. Losing the race here is normal and costs nothing. */
-    private boolean claim(UUID shipmentId) throws SQLException {
+     *  remote call. Losing the race here is normal and costs nothing. The
+     *  value written comes back to the claimant as its fencing token. */
+    private Instant claim(UUID shipmentId) throws SQLException {
         try (Connection c = FreightDb.open();
              PreparedStatement ps = c.prepareStatement("""
                 UPDATE shipments SET claimed_until = now() + ?::interval
-                WHERE id = ? AND (claimed_until IS NULL OR claimed_until < now())""")) {
+                WHERE id = ? AND (claimed_until IS NULL OR claimed_until < now())
+                RETURNING claimed_until""")) {
             ps.setString(1, LEASE.toSeconds() + " seconds");
             ps.setObject(2, shipmentId);
-            return ps.executeUpdate() == 1;
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getTimestamp(1).toInstant() : null;
+            }
         }
     }
 
@@ -167,7 +179,14 @@ public final class FreightDriver {
                     // The call may have been made. Fresh answer first.
                     Answer answer = statusOf(carrier, requestId(w.id(), carrier));
                     switch (answer.kind()) {
-                        case "accepted" -> { adopt(w.id(), carrier, answer.tracking(), at); return; }
+                        case "accepted" -> {
+                            if (answer.tracking() == null || answer.tracking().isBlank()) {
+                                bumpOrPark(w, at);   // malformed good news is still unknown news
+                                return;
+                            }
+                            adopt(w.id(), carrier, answer.tracking(), at);
+                            return;
+                        }
                         case "not_found" -> {
                             // never landed · the same request, same id, is safe
                             if (!callAndRecord(w, carrier, at)) return;
@@ -197,7 +216,17 @@ public final class FreightDriver {
                         "destination", w.destination(), "qty", String.valueOf(w.qty())));
 
         if (r.code() == 200 && "accepted".equals(Json.str(r.body(), "status"))) {
-            adopt(w.id(), carrier, Json.str(r.body(), "tracking"), at);
+            String tracking = Json.str(r.body(), "tracking");
+            if (tracking == null || tracking.isBlank()) {
+                // An accept with no tracking ref is not an accept we can act
+                // on: adopting it would file the label under nothing, every
+                // webhook about the parcel would miss forever, and no audit
+                // would ever fire. Malformed good news is still unknown news.
+                mark(reqId, "unknown", "accepted without a tracking ref");
+                bumpOrPark(w, at);
+                return false;
+            }
+            adopt(w.id(), carrier, tracking, at);
             return true;
         }
         if (r.code() == 200 && "rejected".equals(Json.str(r.body(), "status"))) {
