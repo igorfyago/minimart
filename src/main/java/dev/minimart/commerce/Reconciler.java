@@ -218,7 +218,15 @@ public final class Reconciler {
                             .timeout(Duration.ofSeconds(3)).GET().build(),
                     HttpResponse.BodyHandlers.ofString());
             if (r.statusCode() != 200) return null;
-            String status = Json.str(r.body(), "status");
+            // The intent's OWN status, not the first "status" in the reply. The
+            // same bet intentsAt() stopped making: minipay is free to describe
+            // the card, the customer or the last attempt alongside the payment,
+            // and any of those may carry a status of its own. Reading one of
+            // them here would not fail loudly, it would put a wrong-but-plausible
+            // state into the truth table below and produce a discrepancy report
+            // that is confidently wrong, which is the failure this class exists
+            // to prevent rather than commit.
+            String status = Json.text(r.body(), "status");
             // minipay answers 200 with an error body for an id it does not know,
             // which is how "no such payment" arrives here.
             return status == null ? "absent" : status;
@@ -270,96 +278,14 @@ public final class Reconciler {
         // Neither is ours to make, and this one is not visible when it breaks.
         List<String> out = new ArrayList<>();
         for (String row : rows(body)) {
-            String id = member(row, "id");
+            String id = Json.text(row, "id");
             // A row that will not say whose it is cannot be attributed to this
             // merchant. Skipping it is the honest answer: the alternative is to
             // guess, and guessing is what this class exists to stop.
-            if (id == null || !tenant.equals(member(row, "merchant"))) continue;
+            if (id == null || !tenant.equals(Json.text(row, "merchant"))) continue;
             out.add(id);
         }
         return out;
-    }
-
-    /**
-     * The string a key holds at the TOP LEVEL of one row, or null.
-     *
-     * This belongs beside str() in core.Json and sits here because this change
-     * is scoped to the reconciler. The duplication is at least the house's own
-     * kind: the codec is already deliberately copied per service so that a
-     * merchant and its processor share no model object.
-     */
-    static String member(String row, String key) {
-        if (row == null) return null;
-        int i = ws(row, 0);
-        if (i >= row.length() || row.charAt(i) != '{') return null;
-        i = ws(row, i + 1);
-        while (i < row.length() && row.charAt(i) == '"') {
-            int nameEnd = endOfString(row, i);
-            if (nameEnd < 0) return null;
-            String name = row.substring(i + 1, nameEnd);
-            i = ws(row, nameEnd + 1);
-            if (i >= row.length() || row.charAt(i) != ':') return null;
-            i = ws(row, i + 1);
-            int valueEnd = endOfValue(row, i);
-            if (valueEnd < 0) return null;
-            if (name.equals(key)) {
-                if (row.charAt(i) != '"') return null;          // asked for a name, given a number
-                return unescape(row.substring(i + 1, valueEnd - 1));
-            }
-            // Either another member follows, or the row ended without the key
-            // and the answer is that this row does not have one.
-            i = ws(row, valueEnd);
-            if (i >= row.length() || row.charAt(i) != ',') return null;
-            i = ws(row, i + 1);
-        }
-        return null;
-    }
-
-    private static int ws(String s, int i) {
-        while (i < s.length() && Character.isWhitespace(s.charAt(i))) i++;
-        return i;
-    }
-
-    /** The index of the quote that closes the string starting at i. */
-    private static int endOfString(String s, int i) {
-        for (int j = i + 1; j < s.length(); j++) {
-            char ch = s.charAt(j);
-            if (ch == '\\') { j++; continue; }                  // an escaped quote is not the end
-            if (ch == '"') return j;
-        }
-        return -1;
-    }
-
-    /** One past the end of the value starting at i, whatever kind it is. */
-    private static int endOfValue(String s, int i) {
-        if (i >= s.length()) return -1;
-        char ch = s.charAt(i);
-        if (ch == '"') { int e = endOfString(s, i); return e < 0 ? -1 : e + 1; }
-        if (ch == '{' || ch == '[') {
-            int depth = 0;
-            for (int j = i; j < s.length(); j++) {
-                char c = s.charAt(j);
-                if (c == '"') { int e = endOfString(s, j); if (e < 0) return -1; j = e; continue; }
-                if (c == '{' || c == '[') depth++;
-                else if (c == '}' || c == ']') { if (--depth == 0) return j + 1; }
-            }
-            return -1;
-        }
-        int j = i;
-        while (j < s.length() && ",}] \t\r\n".indexOf(s.charAt(j)) < 0) j++;
-        return j == i ? -1 : j;
-    }
-
-    /** As core.Json's str() does it: drop the backslash and keep what follows. */
-    private static String unescape(String s) {
-        if (s.indexOf('\\') < 0) return s;
-        StringBuilder b = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char ch = s.charAt(i);
-            if (ch == '\\' && i + 1 < s.length()) { b.append(s.charAt(++i)); continue; }
-            b.append(ch);
-        }
-        return b.toString();
     }
 
     /**

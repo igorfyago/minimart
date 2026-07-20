@@ -52,10 +52,15 @@ class ReconcilerRowsLessonTest {
      *  ids that came back from the list. */
     static final String TENANT = "helix-rows";
     static final String RIVAL = "rival-shop";
+    static final String AMBIGUOUS = "helix-ambiguous";
 
     static final String WALLET_INTENT = "pi_" + UUID.randomUUID();
     static final String CARD_INTENT = "pi_" + UUID.randomUUID();
     static final String RIVAL_INTENT = "pi_" + UUID.randomUUID();
+
+    static final String PLAIN_INTENT = "pi_" + UUID.randomUUID();
+    static final String FIRST_ID = "pi_" + UUID.randomUUID();
+    static final String SECOND_ID = "pi_" + UUID.randomUUID();
 
     static String previousPayBaseUrl;
 
@@ -118,6 +123,41 @@ class ReconcilerRowsLessonTest {
         System.out.println("lesson: a nested payment-method id left the merchant's own rows correctly attributed");
     }
 
+    /**
+     * LESSON · A ROW THAT NAMES ITSELF TWICE HAS NOT NAMED ITSELF.
+     *
+     * Duplicate keys are legal on the wire and no two JSON readers agree about
+     * which one wins. RailsLessonTest teaches this about an issuer's decision,
+     * where the cost is obvious: take the first and the payment declines, take
+     * the last and it approves. The cost here is quieter and no smaller. Take
+     * the first and the report names one payment, take the last and it names
+     * another, and an operator is sent at three in the morning to look for
+     * money against an id that was never really the row's.
+     *
+     * So the reader refuses, and the reconciler skips the row. That is a
+     * DELIBERATE loss: this audit would rather be one row short and say so than
+     * be complete and wrong about which payment it read. The row it dropped is
+     * still sitting in minipay for a human to look at, whereas a misattributed
+     * id looks exactly like a finding.
+     */
+    @Test
+    void lesson_a_row_that_gives_its_id_twice_is_skipped_rather_than_guessed() throws Exception {
+        Reconciler.Report r = Reconciler.run(AMBIGUOUS, 100);
+
+        List<String> intents = r.discrepancies().stream().map(Reconciler.Discrepancy::intentId).toList();
+
+        assertFalse(intents.contains(FIRST_ID),
+                "NOT THE FIRST ID. Preferring it is a choice the wire never asked us to make, and the "
+                + "reader that makes it is one library upgrade away from preferring the other.");
+        assertFalse(intents.contains(SECOND_ID), "and not the last one either, for the same reason");
+        assertTrue(intents.contains(PLAIN_INTENT),
+                "AND THE ROW THAT WAS CLEAR ABOUT ITSELF SURVIVED. Refusing one ambiguous row must not "
+                + "cost the merchant the rest of the page: strictness that swallows good rows gets turned off.");
+
+        assertEquals(1, r.intentsChecked(), "one row answered its own question, and one declined to");
+        System.out.println("lesson: a row carrying two ids was skipped, and the rest of the page still read");
+    }
+
     // ------------------------------------------------- the stand-in processor
 
     /**
@@ -141,7 +181,19 @@ class ReconcilerRowsLessonTest {
 
                 + "{\"id\":\"" + RIVAL_INTENT + "\",\"amount\":\"12.00\",\"currency\":\"EUR\","
                 + "\"customer\":\"cyd\",\"merchant\":\"" + RIVAL + "\","
-                + "\"status\":\"succeeded\",\"at\":\"" + T0 + "\"}"
+                + "\"status\":\"succeeded\",\"at\":\"" + T0 + "\"},"
+
+                + "{\"id\":\"" + PLAIN_INTENT + "\",\"amount\":\"20.00\",\"currency\":\"EUR\","
+                + "\"customer\":\"dot\",\"merchant\":\"" + AMBIGUOUS + "\","
+                + "\"status\":\"succeeded\",\"at\":\"" + T0 + "\"},"
+
+                // one row, two ids, both legal. A merge upstream, a retry
+                // written over a retry, a serialiser that learned a field twice:
+                // there are many ways to send this and none of them tell the
+                // reader which id was meant.
+                + "{\"id\":\"" + FIRST_ID + "\",\"amount\":\"33.00\",\"currency\":\"EUR\","
+                + "\"customer\":\"eve\",\"merchant\":\"" + AMBIGUOUS + "\","
+                + "\"id\":\"" + SECOND_ID + "\",\"status\":\"succeeded\",\"at\":\"" + T0 + "\"}"
                 + "]";
         byte[] b = body.getBytes(StandardCharsets.UTF_8);
         ex.getResponseHeaders().set("Content-Type", "application/json");

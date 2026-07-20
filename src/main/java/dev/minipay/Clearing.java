@@ -211,8 +211,17 @@ public final class Clearing {
             mark(batchId, "submitted", null, null, at);
             return find(batchId);
         }
-        String issuerNet = dev.minimart.core.Json.str(response, "net");
-        String issuerRef = dev.minimart.core.Json.str(response, "reference");
+        // READ AS MEMBERS OF THE ACKNOWLEDGEMENT, NOT AS BYTES FOUND IN IT.
+        //
+        // This is the number the whole two-party check is built on: the issuer's
+        // own total, kept beside ours precisely because nobody copied. str()
+        // would answer with the first "net" anywhere in the reply, and the day
+        // the issuer starts itemising what it settled, or explains a mismatch by
+        // quoting our batch back, the first "net" in the document is somebody
+        // else's. We would then store a line's total as the issuer's and the
+        // reconciliation would agree with itself. Neither service could see it.
+        String issuerNet = dev.minimart.core.Json.text(response, "net");
+        String issuerRef = dev.minimart.core.Json.text(response, "reference");
         mark(batchId, "acknowledged", issuerNet == null ? null : new BigDecimal(issuerNet), issuerRef, at);
         return find(batchId);
     }
