@@ -20,12 +20,20 @@
   a { color:var(--accent); }
   header { display:flex; align-items:center; gap:14px; padding:16px 22px; border-bottom:1px solid var(--line);
     position:sticky; top:0; background:rgba(10,13,19,.94); backdrop-filter:blur(10px); flex-wrap:wrap; }
-  h1 { font-size:19px; margin:0; font-weight:750; }
+  h1 { font-size:17px; margin:0; font-weight:650; }
   h1 span { color:var(--accent); }
   .tag { color:var(--dim); font-size:12.5px; }
-  nav { margin-left:auto; }
-  .tab { background:none; border:1px solid var(--line); color:var(--dim); padding:6px 13px;
-    border-radius:999px; font-size:12.5px; text-decoration:none; }
+  nav { display:flex; gap:6px; margin-left:auto; }
+  .tab { background:none; border:1px solid var(--line); color:var(--dim); padding:6px 16px;
+    border-radius:999px; font:600 13px system-ui; cursor:pointer; text-decoration:none; }
+  .tab.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  /* ONE tab row, the bank's convention: on overflow the row scrolls inside
+     the header instead of wrapping or stretching the page. */
+  #topnav { min-width:0; overflow-x:auto; scrollbar-width:none; }
+  #topnav::-webkit-scrollbar { display:none; }
+  #topnav .tab { flex:none; white-space:nowrap; }
+  /* the seam between this service and the rest of the estate */
+  .nav-sep { flex:none; width:1px; align-self:stretch; background:var(--line); margin:0 4px; }
   main { padding:22px; max-width:1120px; margin:0 auto; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin-bottom:16px; }
   h2 { font-size:15px; margin:0 0 4px; font-weight:700; }
@@ -57,7 +65,17 @@
 <header>
   <h1>mini<span>pay</span></h1>
   <span class="tag">authorize, capture, void · and an idempotency layer that means it</span>
-  <nav><a class="tab" href="https://mart.b4rruf3t.com" target="_blank">the shop it serves ↗</a></nav>
+  <!-- minipay is a single view, so it has no own tabs: the wordmark on the
+       left is the current marker, and the estate rides in the SAME window as
+       pills that never carry .on. Same convention as the bank. -->
+  <nav id="topnav">
+    <a class="tab" href="https://mart.b4rruf3t.com">Mart</a>
+    <a class="tab" href="https://bank.b4rruf3t.com">Bank</a>
+    <a class="tab" href="https://desk.b4rruf3t.com">Trade</a>
+    <a class="tab" href="https://b4rruf3t.com">Portal</a>
+    <span class="nav-sep" aria-hidden="true"></span>
+    <a class="tab" href="https://github.com/igorfyago/minimart" target="_blank">GitHub</a>
+  </nav>
 </header>
 
 <main>
