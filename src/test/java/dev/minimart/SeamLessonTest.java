@@ -55,7 +55,7 @@ class SeamLessonTest {
     /** Forwards to minipay and then loses the response, so a request that
      *  genuinely landed still looks like a failure to the caller. */
     static HttpServer lossy;
-    static final int PAY_PORT = 18180, LOSSY_PORT = 18181;
+    static final int PAY_PORT = 18180, LOSSY_PORT = 18181, GARBLED_PORT = 18183;
     static final String TENANT = "helix", LOC = "MAD", VARIANT = "v-mots-10mg";
     static final Instant T0 = Instant.parse("2026-03-01T09:00:00Z");
     static final Instant LATER = T0.plus(java.time.Duration.ofHours(2));
@@ -350,6 +350,63 @@ class SeamLessonTest {
                 + "and " + orphaned.discrepancies().get(0));
     }
 
+    /**
+     * LESSON 5b · AN ANSWER THAT CANNOT BE READ IS NOT AN ANSWER EITHER.
+     *
+     * Lesson 5 taught silence. This is the case that looks nothing like silence
+     * and means the same thing: minipay replies, promptly, with a 200, and what
+     * arrives is not something a reader can walk. A body cut off in flight, a
+     * proxy's error page, an intent that names its status twice.
+     *
+     * statusOf asks for a top-level "status", gets null, and null used to mean
+     * "absent". Absent is not a neutral word here. It is one of the endings that
+     * CLEARS an aborted order, so the failed void of lesson 1, the single
+     * discrepancy this whole class was built to find, would be filed as healthy
+     * on the strength of a body nobody could read. The report would not go
+     * quiet, which is the part that matters: it would go GREEN.
+     *
+     * So absent is now something minipay has to say, by answering with the error
+     * body it sends for an id it does not know. Anything else unreadable is
+     * counted as unreachable, which lesson 5 already established is not a
+     * discrepancy and not agreement either.
+     */
+    @Test
+    void lesson5b_an_unreadable_answer_is_counted_as_unreachable_not_as_absence() throws Exception {
+        UUID orderId = UUID.randomUUID();
+        assertInstanceOf(Checkout.Placed.class, Checkout.place(orderId, TENANT, 70L, VARIANT, LOC, 1, T0));
+        Checkout.voidSabotage = true;
+        assertFalse(Checkout.cancel(orderId, LATER), "the void failed, so the hold is still standing");
+        Checkout.voidSabotage = false;
+
+        // FIRST, through a processor that answers properly: this is the failed
+        // void, and it is exactly the finding an operator has to be given.
+        Reconciler.Report honest = Reconciler.run(TENANT, 100);
+        assertEquals(1, honest.discrepancies().size(), "the hold standing against a cancelled order");
+        assertEquals(Reconciler.Kind.ABORTED_HOLD_STANDING, honest.discrepancies().get(0).kind());
+
+        // NOW the same shop and the same standing hold, through a processor
+        // whose answers arrive truncated. Nothing about the money changed.
+        HttpServer garbled = startGarbledIntents(GARBLED_PORT);
+        try {
+            Checkout.payBaseUrl = "http://localhost:" + GARBLED_PORT;
+            Reconciler.Report unreadable = Reconciler.run(TENANT, 100);
+
+            assertEquals(1, unreadable.unreachable(),
+                    "THE ORDER WAS NOT CHECKED, and the report has to say so. Reading a body it could not "
+                    + "parse as 'no such payment' would clear the one discrepancy in this shop.");
+            assertTrue(unreadable.discrepancies().isEmpty(),
+                    "an unreadable answer is not evidence of a discrepancy either, in either direction");
+            assertFalse(unreadable.agreed(),
+                    "AND IT IS EMPHATICALLY NOT AGREEMENT. This is the assertion that matters: the hold is "
+                    + "still standing, and a report that came back green would send nobody to look at it.");
+        } finally {
+            Checkout.payBaseUrl = "http://localhost:" + PAY_PORT;
+            garbled.stop(0);
+        }
+        System.out.println("lesson 5b: a truncated 200 was counted as unreachable, so the standing hold "
+                + "was not quietly cleared");
+    }
+
     /** LESSON 6 · the endpoint, because an audit nobody can call is a library. */
     @Test
     void lesson6_the_report_is_reachable_over_http() throws Exception {
@@ -413,6 +470,34 @@ class SeamLessonTest {
         });
         s.start();
         return s;
+    }
+
+    /**
+     * A processor that is up, fast, and unreadable.
+     *
+     * The list endpoint answers correctly, which is the whole point: it keeps
+     * the failure narrowed to the one call under examination, so an unreachable
+     * count of 1 can only have come from the intent that could not be read and
+     * not from the page failing around it.
+     */
+    private static HttpServer startGarbledIntents(int port) throws IOException {
+        HttpServer s = HttpServer.create(new InetSocketAddress(port), 0);
+        s.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        s.createContext("/v1/list", ex -> respond(ex, "[]"));
+        // cut off mid-string, the way a body dies when something upstream gives
+        // up halfway through writing it
+        s.createContext("/v1/payment_intents",
+                ex -> respond(ex, "{\"id\":\"pi_x\",\"object\":\"payment_intent\",\"status\":\"requires_cap"));
+        s.start();
+        return s;
+    }
+
+    private static void respond(com.sun.net.httpserver.HttpExchange ex, String body) throws IOException {
+        byte[] b = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        ex.getResponseHeaders().set("Content-Type", "application/json");
+        ex.sendResponseHeaders(200, b.length);
+        ex.getResponseBody().write(b);
+        ex.close();
     }
 
     private static String orderState(Connection c, UUID id) throws Exception {

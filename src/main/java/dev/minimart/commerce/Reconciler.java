@@ -227,9 +227,17 @@ public final class Reconciler {
             // that is confidently wrong, which is the failure this class exists
             // to prevent rather than commit.
             String status = Json.text(r.body(), "status");
-            // minipay answers 200 with an error body for an id it does not know,
-            // which is how "no such payment" arrives here.
-            return status == null ? "absent" : status;
+            if (status != null) return status;
+            // ABSENT IS SOMETHING MINIPAY SAYS, NOT SOMETHING INFERRED FROM
+            // SILENCE. An id it does not know comes back 200 with an error body,
+            // and that is the only reading that earns "absent". A truncated
+            // body, one that names status twice, or any shape text() declines to
+            // walk ALSO leaves status null, and absent is one of the answers
+            // that clears an aborted order. So an unreadable answer is reported
+            // as unreachable, which costs a line in the report, rather than as
+            // absence, which costs the discrepancy this class exists to find.
+            // The same instinct as the null above: not answered is not an answer.
+            return Json.text(r.body(), "error") != null ? "absent" : null;
         } catch (Exception e) {
             return null;
         }
