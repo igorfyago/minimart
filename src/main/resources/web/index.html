@@ -145,14 +145,10 @@
 </style>
 </head>
 <body>
-<script>
-// The estate's shared navigation + identity bar. Every app carries the same
-// tabs and the same sign-in state; its own stylesheet clears the fixed bar.
-fetch('/eco-nav.html').then(r => r.text()).then(html => {
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  doc.querySelectorAll('style, nav, script').forEach(el => document.body.prepend(el));
-}).catch(() => { /* the shop works without the estate bar — permissive applies to chrome too */ });
-</script>
+<!-- The estate's shared navigation + identity bar, served once by auth.
+     Every app carries the same tabs and the same sign-in state; the shop
+     works without it if auth is unreachable. -->
+<script src="https://auth.b4rruf3t.com/eco-nav.js" defer></script>
 <header>
   <h1>mini<span>mart</span></h1>
   <span class="tag">a working shop whose customers are software</span>
