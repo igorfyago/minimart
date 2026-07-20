@@ -76,7 +76,38 @@ public final class Undeliverable {
         }
         UUID orderId = UUID.fromString(orderIdRaw);
 
-        String tenant, variantId, location, mode, state;
+        // LOOK BEFORE LOCKING. Two reasons, both cheap and both load-bearing.
+        //
+        // The lock ordering: Orders.move locks ledger accounts and then the
+        // order row; taking the order row FOR UPDATE here before deciding
+        // whether to act would be the opposite order, and opposite orders are
+        // a deadlock waiting for its interleaving. The unlocked read decides;
+        // only a decision to act takes the lock, and rechecks under it.
+        //
+        // The 'reserved' answer: by construction it cannot happen · freight
+        // learns an order exists from order.fulfilled, which is announced in
+        // the same commit that leaves 'reserved' behind, so a shipment.failed
+        // is always causally downstream of 'fulfilled'. But a guard that
+        // silently swallowed 'reserved' would be BETTING on that causality
+        // forever, and losing the bet would look like nothing at all: claim
+        // recorded, no refund, both audits green. So the impossible case
+        // throws. If it is transient it retries into correctness, and if it
+        // is real it surfaces in the dead letters as the contract violation
+        // it would be, instead of as a customer who paid for nothing.
+        String state = peek(c, orderId);
+        if (state == null) {
+            // freight only ships orders this shop announced; a failure
+            // notice for an order that does not exist is a defect
+            // somebody must SEE, not a retry that will never improve
+            throw new IllegalArgumentException("shipment.failed for an unknown order: " + orderId);
+        }
+        if ("reserved".equals(state)) {
+            throw new IllegalStateException(
+                    "shipment.failed for an order still reserved: freight cannot know this order yet · " + orderId);
+        }
+        if (!"fulfilled".equals(state)) return;    // nothing standing to give back
+
+        String tenant, variantId, location, mode;
         long customerId, qty;
         BigDecimal amount;
         try (PreparedStatement ps = c.prepareStatement("""
@@ -84,18 +115,13 @@ public final class Undeliverable {
                 FROM orders WHERE id = ? FOR UPDATE""")) {
             ps.setObject(1, orderId);
             try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) {
-                    // freight only ships orders this shop announced; a failure
-                    // notice for an order that does not exist is a defect
-                    // somebody must SEE, not a retry that will never improve
-                    throw new IllegalArgumentException("shipment.failed for an unknown order: " + orderId);
-                }
+                rs.next();
                 tenant = rs.getString(1); customerId = rs.getLong(2); variantId = rs.getString(3);
                 location = rs.getString(4); qty = rs.getLong(5); amount = rs.getBigDecimal(6);
                 state = rs.getString(7); mode = rs.getString(8);
             }
         }
-        if (!"fulfilled".equals(state)) return;    // nothing standing to give back
+        if (!"fulfilled".equals(state)) return;    // it moved between the look and the lock
 
         boolean walletMoney = "wallet".equals(mode);
 
@@ -145,5 +171,14 @@ public final class Undeliverable {
                         "refund", walletMoney ? "refunded" : "due",
                         "at", businessAt.toString()),
                 businessAt);
+    }
+
+    private static String peek(Connection c, UUID orderId) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("SELECT state FROM orders WHERE id = ?")) {
+            ps.setObject(1, orderId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
     }
 }

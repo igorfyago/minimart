@@ -90,8 +90,41 @@ class UndeliverableLessonTest {
         }
         assertEquals("undeliverable", orderState(orderId));
         assertEquals("refunded", scalar("SELECT status FROM refund_cases WHERE order_id = '" + orderId + "'"));
+        assertEquals("1", scalar("SELECT COUNT(*) FROM refund_cases"), "one verdict per order, ever");
         assertEquals("1", scalar("SELECT COUNT(*) FROM outbox WHERE event_key = 'order.undeliverable:"
                 + orderId + "'"));
+    }
+
+    /**
+     * LESSON 5 · "TOO EARLY TO KNOW" IS NOT "NOTHING TO GIVE BACK".
+     *
+     * By construction a shipment.failed cannot precede its order being
+     * fulfilled: freight learns the order exists from the same commit that
+     * fulfils it. This lesson exists because the guard must not merely BET on
+     * that causality: an early arrival is answered RETRY, not swallowed, so a
+     * transient interleaving retries into the correct compensation, and a
+     * real contract break would surface in the dead letters instead of as a
+     * customer who paid for nothing while every audit stayed green.
+     */
+    @Test
+    void lesson5_an_early_failure_retries_into_the_refund() throws Exception {
+        UUID orderId = UUID.randomUUID();
+        Orders.fundWallet(TENANT, 7, PRICE, T0);
+        assertInstanceOf(Orders.Ok.class, Orders.submit(orderId, TENANT, 7, VARIANT, LOC, 1, T0));
+        assertEquals("reserved", orderState(orderId));
+
+        assertEquals(EventRuntime.Result.RETRY,
+                runtime.apply("shipment.failed:early", failed(orderId), T0),
+                "an order still reserved is too early to know, never a fact to swallow");
+        assertEquals("0", scalar("SELECT COUNT(*) FROM refund_cases"));
+
+        Orders.fulfil(orderId, T0);
+        assertEquals(1, runtime.retryPending(T0), "the retry lands once the world catches up");
+        assertEquals("undeliverable", orderState(orderId));
+        assertEquals("refunded", scalar("SELECT status FROM refund_cases WHERE order_id = '" + orderId + "'"));
+        try (Connection c = Db.open()) {
+            assertEquals(0, PRICE.compareTo(Ledger.balance(c, Orders.wallet(7))), "the customer is whole");
+        }
     }
 
     /**
@@ -122,6 +155,8 @@ class UndeliverableLessonTest {
                 // even stronger: card money never touched these books at all,
                 // so there is no revenue account for a wrong leg to hide in
             }
+            assertTrue(Ledger.sumZeroViolations(c).isEmpty() && Ledger.driftedAccounts(c).isEmpty(),
+                    "and whatever legs did post, they sum to zero and drift nowhere");
         }
         assertEquals("due", scalar("SELECT status FROM refund_cases WHERE order_id = '" + orderId + "'"));
         assertEquals("pi_" + orderId,
