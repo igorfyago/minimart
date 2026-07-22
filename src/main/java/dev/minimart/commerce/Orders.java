@@ -139,6 +139,18 @@ public final class Orders {
                                 String variantId, String location, long qty, Instant businessAt,
                                 boolean chargeWallet)
             throws SQLException {
+        return submitMode(orderId, tenant, customerId, variantId, location, qty, businessAt,
+                chargeWallet ? "wallet" : "psp");
+    }
+
+    /** As submit, with the payment_mode named outright. "bank_card" reserves
+     *  stock only, exactly like "psp": the money moves at the BANK (the
+     *  customer's real card), never on this shop's own ledger. */
+    public static Result submitMode(UUID orderId, String tenant, long customerId,
+                                    String variantId, String location, long qty, Instant businessAt,
+                                    String mode)
+            throws SQLException {
+        boolean chargeWallet = "wallet".equals(mode);
         try (Connection c = Db.open()) {
             c.setAutoCommit(false);
             try {
@@ -166,7 +178,7 @@ public final class Orders {
                     ps.setObject(1, orderId); ps.setString(2, tenant); ps.setLong(3, customerId);
                     ps.setString(4, variantId); ps.setString(5, location); ps.setLong(6, qty);
                     ps.setBigDecimal(7, amount); ps.setTimestamp(8, java.sql.Timestamp.from(businessAt));
-                    ps.setString(9, chargeWallet ? "wallet" : "psp");
+                    ps.setString(9, mode);
                     ps.executeUpdate();
                 }
                 try (PreparedStatement ps = c.prepareStatement("""

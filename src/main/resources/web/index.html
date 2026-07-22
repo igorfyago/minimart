@@ -324,6 +324,49 @@ if (!CUSTOMER) {
   CUSTOMER = 7000 + Math.floor(Math.random() * 2000);
   localStorage.setItem('mart_customer', String(CUSTOMER));
 }
+// THE LAST USED USER WINS. Signed into the estate (the bank, the desk — the
+// cookie is shared), the shopper is not a minted number but THAT person: the
+// token beats the body's claim server-side, so the page just has to say who
+// arrived. The bank's name for the estate's identity API.
+const AUTH = (location.hostname.endsWith('b4rruf3t.com') ? 'https://auth.b4rruf3t.com' : '') ;
+fetch(AUTH + '/v1/whoami', {credentials: 'include'})
+  .then(r => r.ok ? r.json() : null)
+  .then(u => {
+    if (!u) return;                       // anonymous: the minted number stands
+    const label = (u.name || u.email || 'estate user');
+    $('#shopper').textContent = label + ' · shopping as your bank self';
+    $('#shopper').style.color = 'var(--green, #4ade80)';
+    // The server reads the TOKEN, not this page's claims — so the browser
+    // must actually hold one. Arriving from the bank with the estate cookie
+    // but no local token yet, exchange it silently (same flow as the estate
+    // bar's own refresh). No cookie, no exchange: anonymous stands.
+    const ensureToken = localStorage.getItem('b4rruf3t_token') ? Promise.resolve(true)
+      : fetch(AUTH + '/v1/tokens/refresh', {method: 'POST', credentials: 'include'})
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+          if (!d) return false;
+          localStorage.setItem('b4rruf3t_token', d.access_token);
+          localStorage.setItem('b4rruf3t_refresh', d.refresh_token);
+          return true;
+        })
+        .catch(() => false);
+    // With a token in hand, the SHOP's own whoami names the real customer:
+    // the estate-signed-in shopper IS the bank customer, and from here on
+    // the page's orders, checkouts and card charges all land on that person.
+    ensureToken.then(ok => {
+      if (!ok) return;
+      fetch('/api/whoami', {headers: authHeaders()})
+        .then(r => r.ok ? r.json() : null)
+        .then(w => {
+          if (!w || w.customer == null) return;
+          CUSTOMER = w.customer;
+          localStorage.setItem('mart_customer', String(CUSTOMER));
+          $('#shopper').textContent = (u.name || 'you') + ' · customer ' + CUSTOMER;
+        })
+        .catch(() => {});
+    });
+  })
+  .catch(() => {});                       // auth down: the anonymous shop works on
 const authHeaders = () => {
   const t = localStorage.getItem('b4rruf3t_token');
   return t ? {'Authorization': 'Bearer ' + t} : {};

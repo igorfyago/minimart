@@ -42,6 +42,17 @@ public final class Main {
         seedDemoCatalog();
 
         PayApi.start(payPort);
+        // THE ESTATE LINK. A signed-in user arrives from the bank with a
+        // token; from here on the shop sells to the customer the bank says
+        // that person already is. The adapter is fail-shut: any wobble
+        // (auth down, bank down, a person with no bank account) resolves to
+        // the anonymous shop that has always worked.
+        try {
+            dev.minimart.http.MartApi.identity(dev.minimart.http.EstateIdentity.create());
+            System.out.println("minimart     identity: estate SSO linked (audience mart.b4rruf3t.com)");
+        } catch (Throwable t) {
+            System.out.println("minimart     identity: SSO unavailable, serving anonymously · " + t);
+        }
         MartApi.start(martPort);
         AnalyticsApi.start(analyticsPort);
 

@@ -98,6 +98,17 @@ public final class Checkout {
     /** Reserve the goods, then charge. Compensate if the charge does not land. */
     public static Result place(UUID orderId, String tenant, long customerId,
                                String variantId, String location, long qty, Instant businessAt) throws SQLException {
+        return placeMode(orderId, tenant, customerId, variantId, location, qty, businessAt, "psp");
+    }
+
+    /** As place, choosing the rail the money moves on. "bank_card" charges
+     *  the customer's real card at the bank; every other value is the psp
+     *  path the shop has always run. */
+    public static Result placeMode(UUID orderId, String tenant, long customerId,
+                               String variantId, String location, long qty, Instant businessAt,
+                               String mode) throws SQLException {
+        if ("bank_card".equals(mode))
+            return placeOnBankCard(orderId, tenant, customerId, variantId, location, qty, businessAt);
         Orders.Result reserved = Orders.submit(orderId, tenant, customerId, variantId, location, qty, businessAt, false);
         if (reserved instanceof Orders.OutOfStock) return new Rejected("out of stock");
         if (reserved instanceof Orders.AlreadyProcessed) return new Rejected("already processed");
@@ -156,6 +167,69 @@ public final class Checkout {
             ps.executeUpdate();
         }
         return new Placed(orderId, pi, ok.amount());
+    }
+
+    /** Where the card rail lives. Overridable for the same reason payBaseUrl
+     *  is: a test points it at a bank that is not there. */
+    public static volatile String bankBaseUrl =
+            System.getenv().getOrDefault("MINIBANK_URL", "http://localhost:8080");
+
+    /**
+     * THE FULL CIRCLE · reserve the goods, then charge the customer's REAL
+     * card at the bank. The money never touches this shop's own ledger:
+     * payment_mode "bank_card" carries stock-only legs, exactly like the psp
+     * path, because the charge lives where the customer can see it — their
+     * bank statement, next to everything else they bought.
+     *
+     * The discipline is the one this class already keeps: the call is
+     * journalled BEFORE it goes out, the authorization reference is derived
+     * from the order id (a retried checkout re-asks the same money), a
+     * refused charge gives the goods back, and a maybe is written down as a
+     * maybe — never filed as "no charge exists".
+     */
+    private static Result placeOnBankCard(UUID orderId, String tenant, long customerId,
+                                          String variantId, String location, long qty,
+                                          Instant businessAt) throws SQLException {
+        Orders.Result reserved = Orders.submitMode(orderId, tenant, customerId, variantId,
+                location, qty, businessAt, "bank_card");
+        if (reserved instanceof Orders.OutOfStock) return new Rejected("out of stock");
+        if (reserved instanceof Orders.AlreadyProcessed) return new Rejected("already processed");
+        if (!(reserved instanceof Orders.Ok ok)) return new Rejected("could not reserve");
+
+        String ref = "mart:" + orderId;    // the bank's idempotency key, from the order
+        RemoteSteps.begin(orderId, RemoteSteps.AUTHORIZE, ref, businessAt);
+        try {
+            String body = "{\"customer\":" + customerId
+                    + ",\"amount\":\"" + ok.amount().stripTrailingZeros().toPlainString()
+                    + "\",\"authorization_id\":\"" + UUID.nameUUIDFromBytes(ref.getBytes(java.nio.charset.StandardCharsets.UTF_8)) + "\"}";
+            HttpResponse<String> r = http.send(
+                    HttpRequest.newBuilder(URI.create(bankBaseUrl + "/api/card/charge"))
+                            .timeout(Duration.ofSeconds(3))
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(body)).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (r.statusCode() == 200 && r.body().contains("\"charged\":true")) {
+                RemoteSteps.finish(orderId, RemoteSteps.AUTHORIZE, RemoteSteps.State.OK, null);
+                return new Placed(orderId, ref, ok.amount());
+            }
+            // an ANSWER, and it was no — declined, or the bank said 4xx
+            String reason = r.body().contains("\"reason\"")
+                    ? r.body().replaceAll(".*\"reason\":\"([^\"]*)\".*", "$1") : "HTTP " + r.statusCode();
+            RemoteSteps.finish(orderId, RemoteSteps.AUTHORIZE, RemoteSteps.State.FAILED, reason);
+            Orders.abort(orderId, businessAt);
+            return new Rejected("card declined: " + reason);
+        } catch (Exception e) {
+            // SAME RULE AS THE PSP PATH: a timeout is not a decline. The bank
+            // may be holding a real hold on a real card; that is written down,
+            // the goods still go back, and the reconciler settles the maybe.
+            boolean neverLanded = e instanceof java.net.ConnectException
+                    || e instanceof java.net.http.HttpConnectTimeoutException;
+            RemoteSteps.finish(orderId, RemoteSteps.AUTHORIZE,
+                    neverLanded ? RemoteSteps.State.FAILED : RemoteSteps.State.UNKNOWN,
+                    e.getClass().getSimpleName() + ": " + e.getMessage());
+            try { Orders.abort(orderId, businessAt); } catch (SQLException ignored) {}
+            return new Rejected("bank unreachable: " + e.getClass().getSimpleName());
+        }
     }
 
     /**

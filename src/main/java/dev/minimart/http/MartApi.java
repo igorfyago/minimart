@@ -47,10 +47,15 @@ public final class MartApi {
      */
     static volatile CallerIdentity identity = CallerIdentity.ANONYMOUS;
 
+    /** Swap the doorkeeper · Main installs EstateIdentity at boot, tests
+     *  install their own. Volatile: one write, every virtual thread sees it. */
+    public static void identity(CallerIdentity i) { identity = i; }
+
     public static HttpServer start(int port) throws IOException {
         HttpServer s = HttpServer.create(new InetSocketAddress(port), 0);
         s.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         s.createContext("/api/catalog", MartApi::catalog);
+        s.createContext("/api/whoami", MartApi::whoami);
         s.createContext("/api/checkout", MartApi::checkout);
         s.createContext("/api/orders", MartApi::orders);
         s.createContext("/api/stock", MartApi::stock);
@@ -339,6 +344,19 @@ public final class MartApi {
         }
     }
 
+    /** WHERE THE PAGE LEARNS WHO ARRIVED · the one read of the caller's own
+     *  identity. The shop's pages ask this before they mint an anonymous
+     *  customer number: a signed-in estate user hears back their bank
+     *  customer id and their name, so the shop sells to the person the bank
+     *  already knows. No token, or one that resolves to nobody, is the same
+     *  bare answer — anonymous has always worked here. */
+    private static void whoami(HttpExchange ex) throws IOException {
+        if (!"GET".equals(ex.getRequestMethod())) { send(ex, 405, "{\"error\":\"GET only\"}"); return; }
+        var who = identity.customerFor(ex.getRequestHeaders().getFirst("Authorization"));
+        send(ex, 200, who.map(id -> "{\"customer\":" + id + "}")
+                         .orElse("{\"customer\":null}"));
+    }
+
     /** Reserve goods here, charge at the processor, compensate if that fails. */
     private static void checkout(HttpExchange ex) throws IOException {
         try {
@@ -358,8 +376,15 @@ public final class MartApi {
             // resolves to the body's customer exactly as before.
             long actingCustomer = CallerIdentity.resolve(identity,
                 ex.getRequestHeaders().getFirst("Authorization"), Long.parseLong(customer));
-            Checkout.Result r = Checkout.place(UUID.fromString(orderId), tenant, actingCustomer,
-                    variant, location == null ? "MAD" : location, Long.parseLong(qty), businessAt(body));
+            // THE RAIL FOLLOWS THE CALLER. An estate-identified shopper is a
+            // bank customer, and their purchase lands on their real card —
+            // the whole point of the circle. Everyone else (the anonymous
+            // shopper, the simulation's agents) pays through the processor
+            // exactly as before.
+            String rail = identity.customerFor(ex.getRequestHeaders().getFirst("Authorization"))
+                    .isPresent() ? "bank_card" : "psp";
+            Checkout.Result r = Checkout.placeMode(UUID.fromString(orderId), tenant, actingCustomer,
+                    variant, location == null ? "MAD" : location, Long.parseLong(qty), businessAt(body), rail);
             if (r instanceof Checkout.Placed p) {
                 send(ex, 200, "{\"orderId\":\"" + p.orderId() + "\",\"payment_intent\":\"" + p.paymentIntentId() +
                         "\",\"amount\":\"" + p.amount().stripTrailingZeros().toPlainString() + "\",\"state\":\"reserved\"}");
