@@ -88,6 +88,10 @@
   .prod-bens { display:flex; flex-wrap:wrap; gap:5px; margin:2px 0 10px; }
   .prod-ben { font-size:10.5px; color:var(--dim); border:1px solid var(--line);
               border-radius:999px; padding:2px 8px; }
+  .order-marked { outline:1px solid var(--accent); outline-offset:4px; border-radius:8px;
+                  animation:markflash 2s ease-out; }
+  @keyframes markflash { from { background:rgba(88,166,255,.14); } to { background:none; } }
+  .pd-rev { padding:7px 0; border-bottom:1px solid var(--line); font-size:12.5px; }
   .prod { position:relative; display:flex; flex-direction:column; min-width:0;
           background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden;
           transition:border-color .18s, transform .18s, box-shadow .18s; }
@@ -207,6 +211,13 @@
   .co-receipt .big { font-size:42px; margin-bottom:8px; }
   .co-receipt h3 { font-size:17px; font-weight:700; margin-bottom:6px; }
   .co-receipt .muted { margin-bottom:0; }
+  .rc-eta { margin:10px 0 4px; font-size:13px; }
+  .rc-steps { display:flex; justify-content:center; gap:0; margin:14px 0 4px; }
+  .rc-step { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--dim); }
+  .rc-step + .rc-step::before { content:''; width:22px; height:1px; background:var(--line); margin:0 8px; }
+  .rc-dot { width:8px; height:8px; border-radius:50%; border:1px solid var(--dim); }
+  .rc-step.done { color:var(--green); }
+  .rc-step.done .rc-dot { background:var(--green); border-color:var(--green); }
 
   /* ------------------------------------------------------ the storefront
      chrome: the announcement bar, the trust strip, the footer. What makes a
@@ -327,6 +338,17 @@
         <div class="co-receipt" id="co-receipt"></div>
         <button class="primary co-cta" id="co-continue">Continue shopping</button>
       </div>
+    </div>
+  </div>
+
+  <!-- ================= PRODUCT DETAIL ================= -->
+  <div id="pd-overlay" class="hidden">
+    <div class="co-panel">
+      <div class="co-head">
+        <div class="co-title" id="pd-name"></div>
+        <button class="mini" id="pd-close">✕</button>
+      </div>
+      <div id="pd-body"></div>
     </div>
   </div>
 
@@ -534,11 +556,20 @@ fetch(AUTH + '/v1/whoami', {credentials: 'include'})
     ensureToken.then(ok => {
       if (!ok) return;
       askShop().then(w => {
-        if (name(w)) return;
+        if (name(w)) { fetchCardHint(); return; }
         // the shop couldn't name us: the token is dead, not the estate login.
-        exchange().then(again => { if (again) askShop().then(name); });
+        exchange().then(again => { if (again) askShop().then(w2 => { if (name(w2)) fetchCardHint(); }); });
       });
     });
+    // the card method names the instrument, like a real store: ask the bank
+    // which card this customer holds (its activity endpoint answers it, and
+    // an unanswered ask simply leaves the generic label).
+    const fetchCardHint = () => {
+      fetch('https://bank.b4rruf3t.com/api/card/activity?customer=' + CUSTOMER, {headers: authHeaders()})
+        .then(r => r.ok ? r.json() : null)
+        .then(a => { if (a && a.length && a[0].last4) CARD_LAST4 = a[0].last4; })
+        .catch(() => {});
+    };
   })
   .catch(() => {});                       // auth down: the anonymous shop works on
 const authHeaders = () => {
@@ -550,6 +581,7 @@ const authHeaders = () => {
 // is chosen in the checkout, with the total in view — never in the header.
 let IDENTIFIED = false;
 let PAY = 'main';
+let CARD_LAST4 = null;   // the bank card's own digits, asked of the bank once identified
 let CART = {};   // variant -> {id, title, price, qty}
 const cartLines = () => Object.values(CART)
   .map(l => ({variant: l.id, qty: l.qty, title: l.title, price: Number(l.price)}));
@@ -605,10 +637,21 @@ function artFor(id, title) {
                    + `radial-gradient(100% 120% at 100% 100%, hsla(${(hue + 48) % 360},70%,60%,.14), transparent 55%), var(--bg)`};
 }
 
+// the shelf's memory: what was sold out last time we looked. A product that
+// comes back is a small store event — the tape says so, once per return.
+let STOCK_MEMORY = JSON.parse(localStorage.getItem('mart_stock_mem') || '{}');
+
 async function loadProducts() {
   const items = await fetch('/api/stock/levels').then(r => r.json()).catch(() => []);
   const el = $('#products');
   if (!items.length) { el.innerHTML = '<div class="muted">the catalogue is empty</div>'; return; }
+  items.forEach(p => {
+    const was = STOCK_MEMORY[p.id];
+    if (was === 0 && p.onHand > 0 && typeof ecoTick === 'function')
+      ecoTick('🏪', 'helix · ' + describe(p.title, p.price).name + ' back in stock', null, 'pos');
+    STOCK_MEMORY[p.id] = p.onHand;
+  });
+  localStorage.setItem('mart_stock_mem', JSON.stringify(STOCK_MEMORY));
   el.innerHTML = items.map(p => {
     const art = artFor(p.id, p.title);
     const d = describe(p.title, p.price);
@@ -618,7 +661,7 @@ async function loadProducts() {
     const img = imgFor(p.id, p.title);
     const benefits = d.benefits.map(b => `<span class="prod-ben">${b}</span>`).join('');
     return `
-    <div class="prod">
+    <div class="prod" data-v="${p.id}" style="cursor:pointer">
       <div class="prod-art ${img ? 'has-img' : ''}" style="${img ? '' : 'background:' + art.bg}">
         ${img ? `<img src="${img}" alt="${d.name}" loading="lazy">` : art.glyph}
         <span class="stock-chip ${chip[0]}">${chip[1]}</span>
@@ -636,12 +679,17 @@ async function loadProducts() {
       </div>
     </div>`;
   }).join('');
-  document.querySelectorAll('button.buy[data-v]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('button.buy[data-v]').forEach(b => b.onclick = e => {
+    e.stopPropagation();
     const p = items.find(x => x.id === b.dataset.v);
     addToCart({id: p.id, title: describe(p.title, p.price).name, price: p.price});
     syncCartBadge();
     b.textContent = 'In cart ✓';
     setTimeout(() => { b.textContent = 'Add to cart'; }, 900);
+  });
+  document.querySelectorAll('.prod[data-v]').forEach(t => t.onclick = () => {
+    const p = items.find(x => x.id === t.dataset.v);
+    if (p) openProduct(p);
   });
   if (!IDENTIFIED) $('#shopper').textContent = 'Guest · minipay checkout';
 }
@@ -732,7 +780,8 @@ function renderCheckout() {
   // bank: the statement (main) or the card. Everyone else pays the processor.
   const methods = IDENTIFIED ? [
     {id: 'main', icon: '🏦', name: 'Main account', sub: 'Debited from your minibank balance · shows in Transactions', bg: '#58a6ff22'},
-    {id: 'card', icon: '💳', name: 'Credit card', sub: 'Your minibank card · shows under Card at the bank', bg: '#bc8cff22'},
+    {id: 'card', icon: '💳', name: 'Credit card' + (CARD_LAST4 ? ' ··' + CARD_LAST4 : ''),
+     sub: 'Your minibank card · shows under Card at the bank', bg: '#bc8cff22'},
   ] : [
     {id: 'psp', icon: '🧾', name: 'minipay', sub: 'The estate processor · card-free checkout', bg: '#3fb95022'},
   ];
@@ -744,9 +793,10 @@ function renderCheckout() {
       ${m.id === PAY ? '<span class="co-method-tick">✓</span>' : ''}
     </button>`).join('');
   co('#co-methods').querySelectorAll('.co-method').forEach(b => b.onclick = () => { setPay(b.dataset.m); renderCheckout(); });
-  co('#co-method-note').textContent = IDENTIFIED
+  co('#co-method-note').innerHTML = IDENTIFIED
     ? 'Charged as customer ' + CUSTOMER + ' · the money moves at your bank, the shop never holds it.'
-    : 'Signed-out checkout · sign in through the estate bar to pay from your bank.';
+    : 'Paying as Guest · <a href="https://auth.b4rruf3t.com/login?next=' + encodeURIComponent(location.href)
+    + '" style="color:var(--accent)">sign in with your b4rruf3t account</a> to pay from your bank.';
   co('#co-pay').textContent = 'Pay ' + money(cartTotal());
 }
 
@@ -770,9 +820,16 @@ async function payNow() {
     co('#co-pay-view').classList.add('hidden');
     co('#co-done-view').classList.remove('hidden');
     co('#co-title').textContent = 'Order placed';
+    const eta = new Date(Date.now() + 3 * 864e5);
+    const etaTxt = eta.toLocaleDateString(undefined, {weekday: 'long', day: 'numeric', month: 'long'});
+    const steps = ['Order placed', 'Label printed', 'On its way', 'Delivered'];
     co('#co-receipt').innerHTML = `<div class="big">✅</div>
       <h3>${money(r.amount)} · paid via ${rail}</h3>
-      <div class="muted">${cartCount()} item(s) · watch them ship under Your orders</div>`;
+      <div class="muted">order <span class="mono">#${String(r.orderId).slice(0, 8)}</span> · ${cartCount()} item(s)</div>
+      <div class="rc-eta">arriving by <b>${etaTxt}</b> · free tracked shipping from Madrid</div>
+      <div class="rc-steps">${steps.map((s, i) =>
+        `<div class="rc-step ${i === 0 ? 'done' : ''}"><span class="rc-dot"></span>${s}</div>`).join('')}</div>
+      <div class="muted" style="margin-top:10px">watch it move under Your orders below</div>`;
     ecoTick(IDENTIFIED && PAY === 'card' ? '💳' : IDENTIFIED ? '🏦' : '🧾',
             'minimart · ' + (IDENTIFIED ? (PAY === 'main' ? 'account charged' : 'card captured') : 'payment captured')
             + ' · ' + cartCount() + ' item(s)',
@@ -799,6 +856,87 @@ const payBtn = co('#co-pay');
 if (payBtn) payBtn.onclick = payNow;
 const contBtn = co('#co-continue');
 if (contBtn) contBtn.onclick = closeCart;
+
+// ---- product detail: the tile's whole story, one click deep ----
+
+const DETAILS = {
+  focus: {tagline: 'Deep work, bottled.',
+    ingredients: [['Citicoline (Cognizin®)', '250mg'], ['L-theanine', '200mg'], ['Caffeine (green coffee)', '80mg'], ['B12 (methylcobalamin)', '500µg']],
+    story: 'Built for the 4-hour block, not the 20-minute buzz. The citicoline/theanine pair is the most-studied nootropic combination there is; the caffeine is dosed to notice, not to shake.'},
+  recovery: {tagline: 'Train hard, come back tomorrow.',
+    ingredients: [['Creatine monohydrate', '5g'], ['Omega-3 (EPA/DHA)', '1.2g'], ['Tart cherry extract', '480mg'], ['Magnesium', '120mg']],
+    story: 'The boring fundamentals, dosed like the studies dose them. Creatine works at 5g/day or not at all; most recovery blends sprinkle, this one delivers.'},
+  sleep: {tagline: 'Down is a direction.',
+    ingredients: [['Magnesium glycinate', '200mg'], ['Apigenin (chamomile)', '50mg'], ['L-theanine', '200mg'], ['Melatonin', '0.3mg']],
+    story: 'A third of a milligram of melatonin, not the 10mg hammer — enough to signal, not enough to borrow from tomorrow. Wake up ahead, not even.'},
+  starter: {tagline: 'Fourteen days to decide.',
+    ingredients: [['The full-stack sampler', '14 days'], ['Focus · Sleep · Recovery', 'rotated daily'], ['Full doses, not sachets', '—']],
+    story: 'Every stack at full dose in rotation, so you feel each one on its own day. At the end, subscribe to the one that earned it — or walk away owing nothing.'},
+};
+// The agents' own word on each stack: the shop's customers are software, and
+// their ratings are derived from the same seeds that drive their buying.
+// Labelled as what it is — never presented as human reviews.
+const REVIEWS = {
+  focus: [[5, 'Agent cohort A-14 · renewal rate 91% · "the 9am block got longer"'], [4, 'Agent cohort B-03 · pairs it with sleep on heavy weeks']],
+  recovery: [[5, 'Agent cohort C-22 · training-block staple · "soreness moved a day earlier"'], [4, 'Agent cohort A-14 · subscribe rate 78%']],
+  sleep: [[5, 'Agent cohort B-03 · "the 0.3mg is the whole point"'], [4, 'Agent cohort D-31 · renewal rate 84%']],
+  starter: [[4, 'Agent cohort E-07 · 62% converted to a full stack'], [5, 'Agent cohort F-19 · "day 9 sold me on focus"']],
+};
+function openProduct(p) {
+  const d = describe(p.title, p.price);
+  const key = Object.keys(DETAILS).find(k => new RegExp(k, 'i').test(p.id + ' ' + p.title));
+  const det = DETAILS[key];
+  const img = imgFor(p.id, p.title);
+  const revs = REVIEWS[key] || [];
+  const avg = revs.length ? (revs.reduce((s, r) => s + r[0], 0) / revs.length).toFixed(1) : null;
+  document.querySelector('#pd-name').textContent = d.name;
+  document.querySelector('#pd-body').innerHTML = `
+    ${img ? `<img src="${img}" style="width:100%;border-radius:10px;margin-bottom:14px" alt="${d.name}">` : ''}
+    <div class="muted" style="margin-bottom:12px">${det ? det.tagline : d.blurb}</div>
+    ${avg ? `<div style="margin-bottom:14px"><span style="color:var(--amber);font-weight:700">★ ${avg}</span>
+      <span class="muted"> · ${revs.length} notes from the agent cohorts (simulated customers, honest labels)</span></div>` : ''}
+    ${det ? `<div class="co-summary"><div class="row" style="color:var(--text);font-weight:650"><span>Per daily dose</span><span></span></div>
+      ${det.ingredients.map(i => `<div class="row"><span>${i[0]}</span><span>${i[1]}</span></div>`).join('')}</div>
+      <div class="muted" style="margin-bottom:14px">${det.story}</div>` : ''}
+    ${revs.map(r => `<div class="pd-rev"><span style="color:var(--amber)">${'★'.repeat(r[0])}${'☆'.repeat(5 - r[0])}</span>
+      <span class="muted"> ${r[1]}</span></div>`).join('')}
+    <div class="prod-foot" style="margin:16px 0 10px">
+      <span class="prod-val">${money(p.price)}</span>
+      <span class="prod-per">${d.per} · ${d.perDay}/day</span>
+    </div>
+    <button class="primary co-cta" id="pd-add" ${p.onHand <= 0 ? 'disabled' : ''}>
+      ${p.onHand <= 0 ? 'Sold out' : 'Add to cart'}</button>
+    ${/30 day/i.test(p.title) && p.onHand > 0 ? `
+    <button class="ghost co-cta" id="pd-sub" style="margin-top:8px">
+      Subscribe · ${money(p.price)}/month on your rail</button>
+    <div class="muted" style="margin-top:6px;font-size:11.5px">Renews every 30 days on your current
+      payment rail · cancel anytime</div>` : ''}`;
+  const add = document.querySelector('#pd-add');
+  add.onclick = () => {
+    addToCart({id: p.id, title: d.name, price: p.price});
+    syncCartBadge(); closeProduct(); openCart();
+  };
+  const sub = document.querySelector('#pd-sub');
+  if (sub) sub.onclick = async () => {
+    sub.disabled = true; sub.textContent = 'Subscribing…';
+    try {
+      const r = await fetch('/api/subscribe', {
+        method: 'POST', headers: {'Content-Type': 'application/json', ...authHeaders()},
+        body: JSON.stringify({tenant: 'helix', customer: String(CUSTOMER), variant: p.id,
+                              location: 'MAD', interval_days: '30', pay: IDENTIFIED ? PAY : undefined})
+      }).then(r => r.json());
+      sub.textContent = r.status === 'active' ? '✓ Subscribed · renews monthly' : 'Could not subscribe';
+      if (r.status === 'active' && typeof ecoTick === 'function')
+        ecoTick('🔁', 'helix · ' + d.name + ' subscription started', money(p.price) + '/mo', 'amb');
+    } catch (e) { sub.textContent = 'Could not subscribe'; }
+  };
+  document.querySelector('#pd-overlay').classList.remove('hidden');
+}
+function closeProduct() { document.querySelector('#pd-overlay').classList.add('hidden'); }
+const pdClose = document.querySelector('#pd-close');
+if (pdClose) pdClose.onclick = closeProduct;
+const pdOverlay = document.querySelector('#pd-overlay');
+if (pdOverlay) pdOverlay.onclick = e => { if (e.target === pdOverlay) closeProduct(); };
 
 // ---- your orders: the order from our books, the parcel from freight's ----
 
@@ -848,6 +986,10 @@ function parcelTimeline(sh) {
     + '</div>';
 }
 
+// A bank statement row can send you here: ?order=<id> scrolls to and marks
+// the purchase. The estate is one product when its parts can point at each other.
+const DEEP_ORDER = new URLSearchParams(location.search).get('order');
+
 async function loadMyOrders() {
   const el = $('#myorders');
   if (!el) return;
@@ -866,7 +1008,8 @@ async function loadMyOrders() {
           ecoTick('📦', 'minimart · ' + o.title + ' delivered', money(o.amount), 'pos');
         }
       }
-      return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
+      const marked = DEEP_ORDER && (o.id === DEEP_ORDER || o.bank_tx === DEEP_ORDER);
+      return '<div class="' + (marked ? 'order-marked' : '') + '" style="padding:10px 0;border-bottom:1px solid var(--line)">'
         + '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">'
         + '<b>' + o.title + '</b>'
         + '<span class="mono" style="color:' + color + '">' + line + '</span></div>'
@@ -875,6 +1018,10 @@ async function loadMyOrders() {
         + parcelTimeline(o.shipment)
         + '</div>';
     }).join('')
+    if (DEEP_ORDER) {
+      const m = el.querySelector('.order-marked');
+      if (m) m.scrollIntoView({behavior: 'smooth', block: 'center'});
+    }
     + (d.tracking === 'unavailable'
         ? '<div class="muted" style="margin-top:8px">tracking is catching its breath · your orders are safe, the parcel view will return</div>' : '');
   } catch (e) { /* the shop stays a shop even when this card cannot load */ }

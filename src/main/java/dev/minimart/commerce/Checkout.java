@@ -253,6 +253,15 @@ public final class Checkout {
             return rej;
         }
         Placed p = (Placed) charged;
+        // the bank's own tx for this charge is derivable ("mart:"+group → the
+        // reference UUID), and the order rows carry the reference string so
+        // /api/my/orders can hand the bank's tx back for deep links
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement("UPDATE orders SET payment_intent_id = ? WHERE id = ANY(?)")) {
+            ps.setString(1, p.paymentIntentId());
+            ps.setArray(2, c.createArrayOf("uuid", placed.toArray()));
+            ps.executeUpdate();
+        }
         return new CartPlaced(groupId, p.paymentIntentId(), total, placed);
     }
 
@@ -451,6 +460,18 @@ public final class Checkout {
     }
 
     private static boolean settle(UUID orderId, String action, Instant businessAt) throws SQLException {
+        // BANK-RAIL ORDERS HAVE NOTHING TO SETTLE HERE. The bank's charge
+        // authorises AND captures in one call (that is what "charged":true
+        // means); sending a capture to the processor for an intent that never
+        // existed there is a 404 dressed as a billing failure.
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement("SELECT payment_mode FROM orders WHERE id = ?")) {
+            ps.setObject(1, orderId);
+            try (var rs = ps.executeQuery()) {
+                if (rs.next() && !"psp".equals(rs.getString(1)) && !"wallet".equals(rs.getString(1)))
+                    return RemoteSteps.CAPTURE.equals(action);
+            }
+        }
         RemoteSteps.begin(orderId, action, intentIdFor(orderId), businessAt);
         // The sabotage seams sit AFTER the journal entry on purpose: a fault
         // that is invisible to the record is not a rehearsal of anything, since

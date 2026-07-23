@@ -201,7 +201,8 @@ public final class MartApi {
             String interval = Json.str(body, "interval_days");
             Instant at = businessAt(body);
             UUID id = Billing.subscribe(tenant, customer, variant, location,
-                    interval == null ? 30 : Integer.parseInt(interval), at);
+                    interval == null ? 30 : Integer.parseInt(interval), at,
+                    Json.str(body, "pay"));
             Billing.Subscription outcome = Billing.lastSubscribeResult();
             // SUBSCRIBE IS IDEMPOTENT, so it may have created nothing and handed
             // back a subscription the customer already had, possibly one in
@@ -483,11 +484,12 @@ public final class MartApi {
             if (customer == null) { send(ex, 400, "{\"error\":\"a token, or ?customer=\"}"); return; }
 
             record Row(String id, String title, long qty, java.math.BigDecimal amount,
-                       String state, String refund, String at) {}
+                       String state, String refund, String at, String intent) {}
             java.util.List<Row> rows = new java.util.ArrayList<>();
             try (Connection c = Db.open();
                  PreparedStatement ps = c.prepareStatement("""
-                        SELECT o.id, v.title, o.qty, o.amount, o.state, rc.status, o.business_at
+                        SELECT o.id, v.title, o.qty, o.amount, o.state, rc.status, o.business_at,
+                               o.payment_intent_id
                         FROM orders o JOIN variants v ON v.id = o.variant_id
                         LEFT JOIN refund_cases rc ON rc.order_id = o.id
                         WHERE o.customer_id = ? ORDER BY o.business_at DESC, o.id LIMIT 20""")) {
@@ -495,7 +497,7 @@ public final class MartApi {
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) rows.add(new Row(rs.getString(1), rs.getString(2), rs.getLong(3),
                             rs.getBigDecimal(4), rs.getString(5), rs.getString(6),
-                            rs.getTimestamp(7).toInstant().toString()));
+                            rs.getTimestamp(7).toInstant().toString(), rs.getString(8)));
                 }
             }
 
@@ -512,6 +514,14 @@ public final class MartApi {
                         .append("\",\"state\":\"").append(r.state())
                         .append("\",\"refund\":").append(r.refund() == null ? "null" : "\"" + r.refund() + "\"")
                         .append(",\"at\":\"").append(r.at()).append("\"");
+                if (r.intent() != null) b.append(",\"intent\":\"").append(r.intent()).append("\"");
+                // the bank's own transaction for this charge, when there is one:
+                // the reference is "mart:<group>" and the bank tx id is its
+                // name-UUID — the deep link the statement row points at
+                if (r.intent() != null && r.intent().startsWith("mart:"))
+                    b.append(",\"bank_tx\":\"")
+                     .append(UUID.nameUUIDFromBytes(r.intent().getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                     .append("\"");
                 String shipment = null;
                 if (freightAnswering && ("fulfilled".equals(r.state()) || "undeliverable".equals(r.state()))) {
                     try {

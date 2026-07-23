@@ -84,6 +84,15 @@ public final class Billing {
      *  silently did nothing and handed back the dead subscription. */
     public static UUID subscribe(String tenant, long customerId, String variantId, String location,
                                  int intervalDays, Instant businessAt) throws SQLException {
+        return subscribe(tenant, customerId, variantId, location, intervalDays, businessAt, "psp");
+    }
+
+    /** As subscribe, remembering how the customer pays. An estate shopper's
+     *  rail ("bank_main" / "bank_card") is stored with the subscription and
+     *  every renewal rides it; anything else is the processor, as before. */
+    public static UUID subscribe(String tenant, long customerId, String variantId, String location,
+                                 int intervalDays, Instant businessAt, String payRail) throws SQLException {
+        String rail = "bank_main".equals(payRail) || "bank_card".equals(payRail) ? payRail : "psp";
         try (Connection c = Db.open()) {
             c.setAutoCommit(false);
             try {
@@ -116,12 +125,13 @@ public final class Billing {
                 int inserted;
                 try (PreparedStatement ps = c.prepareStatement("""
                         INSERT INTO subscriptions(id, tenant, customer_id, variant_id, location, status,
-                                                  interval_days, period_index, next_renewal_at, business_at)
-                        VALUES (?,?,?,?,?, 'active', ?, 0, ?, ?) ON CONFLICT (id) DO NOTHING""")) {
+                                                  interval_days, period_index, next_renewal_at, business_at, pay_rail)
+                        VALUES (?,?,?,?,?, 'active', ?, 0, ?, ?, ?) ON CONFLICT (id) DO NOTHING""")) {
                     ps.setObject(1, id); ps.setString(2, tenant); ps.setLong(3, customerId);
                     ps.setString(4, variantId); ps.setString(5, location); ps.setInt(6, intervalDays);
                     ps.setTimestamp(7, java.sql.Timestamp.from(businessAt));
                     ps.setTimestamp(8, java.sql.Timestamp.from(businessAt));
+                    ps.setString(9, rail);
                     // the row count IS the answer to "did this create anything",
                     // taken by the statement that would know
                     inserted = ps.executeUpdate();
@@ -144,12 +154,13 @@ public final class Billing {
      */
     public static Report renewOnce(Instant now, int limit) throws SQLException {
         record Due(UUID id, String tenant, long customerId, String variantId, String location,
-                   int periodIndex, int intervalDays, String status, boolean cancelAtEnd) {}
+                   int periodIndex, int intervalDays, String status, boolean cancelAtEnd,
+                   String payRail) {}
         List<Due> due = new ArrayList<>();
         try (Connection c = Db.open();
              PreparedStatement ps = c.prepareStatement("""
                      SELECT id, tenant, customer_id, variant_id, location, period_index, interval_days,
-                            status, cancel_at_period_end
+                            status, cancel_at_period_end, pay_rail
                      FROM subscriptions
                      WHERE status IN ('active','past_due') AND next_renewal_at <= ?
                      ORDER BY next_renewal_at LIMIT ?""")) {
@@ -158,7 +169,7 @@ public final class Billing {
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) due.add(new Due((UUID) rs.getObject(1), rs.getString(2), rs.getLong(3),
                         rs.getString(4), rs.getString(5), rs.getInt(6), rs.getInt(7),
-                        rs.getString(8), rs.getBoolean(9)));
+                        rs.getString(8), rs.getBoolean(9), rs.getString(10)));
             }
         }
 
@@ -199,8 +210,11 @@ public final class Billing {
             // behind it goes unbilled, which is how one bad record becomes a
             // day of lost revenue.
             try {
-            Checkout.Result r = Checkout.place(orderId, d.tenant(), d.customerId(),
-                    d.variantId(), d.location(), 1, now);
+            // THE RAIL THE CUSTOMER CHOSE. A bank subscriber's renewal is a
+            // real bank charge on the same rail as their first order; the
+            // processor serves everyone else, exactly as before.
+            Checkout.Result r = Checkout.placeMode(orderId, d.tenant(), d.customerId(),
+                    d.variantId(), d.location(), 1, now, d.payRail());
 
             // AUTHORISED IS NOT CAPTURED. The first version threw this boolean
             // away and marked the invoice paid regardless, so a capture that

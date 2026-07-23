@@ -55,6 +55,9 @@ function makeWorld({ storedToken, refreshAnswers, martWhoamiAnswers }) {
       const a = martWhoamiAnswers(auth);
       return Promise.resolve({ ok: a.ok, json: () => Promise.resolve(a.body) });
     }
+    if (url.includes('/api/card/activity')) {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([{ last4: '4388' }]) });
+    }
     throw new Error('unexpected fetch ' + url);
   };
   const sandbox = {
