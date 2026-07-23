@@ -65,6 +65,12 @@ public final class EstateIdentity {
 
     /** SsoUser -> bank customer id, cached, fail-shut to empty. */
     private static Optional<Long> customerFor(SsoUser user) {
+        return customerForTest(user);
+    }
+
+    /** The same resolution, visible to the full-circle lesson: the mart's
+     *  whois hop is what it asserts on, not the private wiring above it. */
+    public static Optional<Long> customerForTest(SsoUser user) {
         String name = user.name();
         if (name == null || name.isBlank()) return Optional.empty();
         String key = name.trim().toLowerCase();
