@@ -188,6 +188,11 @@
       </div>
       <div class="shop-meta">
         <span class="pill" id="shopper">you are customer</span>
+        <span id="pay-choice" class="hidden" style="gap:6px;align-items:center">
+          <span class="muted" style="font-size:12px">pay with</span>
+          <button class="mini" data-pay="main">main acct</button>
+          <button class="mini" data-pay="card">credit card</button>
+        </span>
         <button class="mini" id="refresh-shop">Refresh</button>
       </div>
     </div>
@@ -373,8 +378,10 @@ fetch(AUTH + '/v1/whoami', {credentials: 'include'})
     const name = w => {
       if (!w || w.customer == null) return false;
       CUSTOMER = w.customer;
+      IDENTIFIED = true;
       localStorage.setItem('mart_customer', String(CUSTOMER));
       $('#shopper').textContent = (u.name || 'you') + ' · customer ' + CUSTOMER;
+      renderPayChoice();
       return true;
     };
     ensureToken.then(ok => {
@@ -391,6 +398,28 @@ const authHeaders = () => {
   const t = localStorage.getItem('b4rruf3t_token');
   return t ? {'Authorization': 'Bearer ' + t} : {};
 };
+
+// THE TILL'S QUESTION · main acct or credit card. Only an estate-identified
+// shopper is ever asked: their purchase rides their bank either way, and the
+// choice is which surface shows it — the EUR statement (main) or the card
+// activity (credit). Anonymous shoppers keep the processor and never see this.
+let IDENTIFIED = false;
+let PAY = 'main';
+const checkoutBody = variant => {
+  const body = {orderId: uuid(), tenant: 'helix', customer: String(CUSTOMER),
+                variant, location: 'MAD', qty: 1};
+  if (IDENTIFIED) body.pay = PAY;
+  return body;
+};
+function renderPayChoice() {
+  const el = document.querySelector('#pay-choice');
+  if (!el) return;
+  el.classList.toggle('hidden', !IDENTIFIED);
+  el.querySelectorAll('button[data-pay]').forEach(b => {
+    b.classList.toggle('on', b.dataset.pay === PAY);
+    b.onclick = () => { PAY = b.dataset.pay; renderPayChoice(); };
+  });
+}
 
 const refresh = document.querySelector('#refresh-shop');
 if (refresh) refresh.onclick = () => loadProducts();
@@ -469,11 +498,12 @@ function describe(title) {
 
 async function buy(variant, btn) {
   btn.disabled = true; btn.textContent = 'Reserving…';
-  const orderId = uuid();
+  const body = checkoutBody(variant);
+  const orderId = body.orderId;
   try {
     const r = await fetch('/api/checkout', {
       method: 'POST', headers: {'Content-Type': 'application/json', ...authHeaders()},
-      body: JSON.stringify({orderId, tenant: 'helix', customer: String(CUSTOMER), variant, location: 'MAD', qty: 1})
+      body: JSON.stringify(body)
     }).then(r => r.json());
     if (r.error) { toast('Declined: ' + r.error); }
     else {

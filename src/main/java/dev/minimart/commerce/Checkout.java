@@ -102,13 +102,14 @@ public final class Checkout {
     }
 
     /** As place, choosing the rail the money moves on. "bank_card" charges
-     *  the customer's real card at the bank; every other value is the psp
-     *  path the shop has always run. */
+     *  the customer's real card at the bank, "bank_main" debits their main
+     *  EUR account there; every other value is the psp path the shop has
+     *  always run. */
     public static Result placeMode(UUID orderId, String tenant, long customerId,
                                String variantId, String location, long qty, Instant businessAt,
                                String mode) throws SQLException {
-        if ("bank_card".equals(mode))
-            return placeOnBankCard(orderId, tenant, customerId, variantId, location, qty, businessAt);
+        if ("bank_card".equals(mode) || "bank_main".equals(mode))
+            return placeAtBank(orderId, tenant, customerId, variantId, location, qty, businessAt, mode);
         Orders.Result reserved = Orders.submit(orderId, tenant, customerId, variantId, location, qty, businessAt, false);
         if (reserved instanceof Orders.OutOfStock) return new Rejected("out of stock");
         if (reserved instanceof Orders.AlreadyProcessed) return new Rejected("already processed");
@@ -192,20 +193,42 @@ public final class Checkout {
     private static Result placeOnBankCard(UUID orderId, String tenant, long customerId,
                                           String variantId, String location, long qty,
                                           Instant businessAt) throws SQLException {
+        return placeAtBank(orderId, tenant, customerId, variantId, location, qty, businessAt, "bank_card");
+    }
+
+    /** The two bank rails share everything but the ask: the card ride holds
+     *  and captures at /api/card/charge, the main account debits the EUR
+     *  statement at /api/main/charge. Same journal, same derived reference,
+     *  same honesty about a maybe. */
+    private static Result placeAtBank(UUID orderId, String tenant, long customerId,
+                                      String variantId, String location, long qty,
+                                      Instant businessAt, String mode) throws SQLException {
         Orders.Result reserved = Orders.submitMode(orderId, tenant, customerId, variantId,
-                location, qty, businessAt, "bank_card");
+                location, qty, businessAt, mode);
         if (reserved instanceof Orders.OutOfStock) return new Rejected("out of stock");
         if (reserved instanceof Orders.AlreadyProcessed) return new Rejected("already processed");
         if (!(reserved instanceof Orders.Ok ok)) return new Rejected("could not reserve");
 
         String ref = "mart:" + orderId;    // the bank's idempotency key, from the order
         RemoteSteps.begin(orderId, RemoteSteps.AUTHORIZE, ref, businessAt);
+        String amount = ok.amount().stripTrailingZeros().toPlainString();
+        String path, body;
+        if ("bank_main".equals(mode)) {
+            path = "/api/main/charge";
+            body = "{\"customer\":" + customerId
+                    + ",\"amount\":\"" + amount
+                    + "\",\"reference\":\"" + UUID.nameUUIDFromBytes(ref.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                    + "\",\"merchant\":\"minimart\"}";
+        } else {
+            path = "/api/card/charge";
+            body = "{\"customer\":" + customerId
+                    + ",\"amount\":\"" + amount
+                    + "\",\"authorization_id\":\"" + UUID.nameUUIDFromBytes(ref.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                    + "\",\"merchant\":\"minimart\"}";
+        }
         try {
-            String body = "{\"customer\":" + customerId
-                    + ",\"amount\":\"" + ok.amount().stripTrailingZeros().toPlainString()
-                    + "\",\"authorization_id\":\"" + UUID.nameUUIDFromBytes(ref.getBytes(java.nio.charset.StandardCharsets.UTF_8)) + "\"}";
             HttpResponse<String> r = http.send(
-                    HttpRequest.newBuilder(URI.create(bankBaseUrl + "/api/card/charge"))
+                    HttpRequest.newBuilder(URI.create(bankBaseUrl + path))
                             .timeout(Duration.ofSeconds(3))
                             .header("Content-Type", "application/json")
                             .POST(HttpRequest.BodyPublishers.ofString(body)).build(),
@@ -219,7 +242,7 @@ public final class Checkout {
                     ? r.body().replaceAll(".*\"reason\":\"([^\"]*)\".*", "$1") : "HTTP " + r.statusCode();
             RemoteSteps.finish(orderId, RemoteSteps.AUTHORIZE, RemoteSteps.State.FAILED, reason);
             Orders.abort(orderId, businessAt);
-            return new Rejected("card declined: " + reason);
+            return new Rejected(("bank_main".equals(mode) ? "account declined: " : "card declined: ") + reason);
         } catch (Exception e) {
             // SAME RULE AS THE PSP PATH: a timeout is not a decline. The bank
             // may be holding a real hold on a real card; that is written down,

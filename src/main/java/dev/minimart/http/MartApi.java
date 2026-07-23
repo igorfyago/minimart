@@ -376,13 +376,15 @@ public final class MartApi {
             // resolves to the body's customer exactly as before.
             long actingCustomer = CallerIdentity.resolve(identity,
                 ex.getRequestHeaders().getFirst("Authorization"), Long.parseLong(customer));
-            // THE RAIL FOLLOWS THE CALLER. An estate-identified shopper is a
-            // bank customer, and their purchase lands on their real card —
-            // the whole point of the circle. Everyone else (the anonymous
-            // shopper, the simulation's agents) pays through the processor
-            // exactly as before.
-            String rail = identity.customerFor(ex.getRequestHeaders().getFirst("Authorization"))
-                    .isPresent() ? "bank_card" : "psp";
+            // THE RAIL FOLLOWS THE CALLER, AND THE CALLER CHOOSES. An
+            // estate-identified shopper pays at their bank: "pay":"main"
+            // debits the EUR statement, anything else (or nothing) rides the
+            // card. Everyone else (the anonymous shopper, the simulation's
+            // agents) pays through the processor exactly as before.
+            String auth = ex.getRequestHeaders().getFirst("Authorization");
+            boolean identified = identity.customerFor(auth).isPresent();
+            String pay = Json.str(body, "pay");
+            String rail = identified ? ("main".equals(pay) ? "bank_main" : "bank_card") : "psp";
             Checkout.Result r = Checkout.placeMode(UUID.fromString(orderId), tenant, actingCustomer,
                     variant, location == null ? "MAD" : location, Long.parseLong(qty), businessAt(body), rail);
             if (r instanceof Checkout.Placed p) {

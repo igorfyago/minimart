@@ -23,7 +23,14 @@ function identityScript() {
   const m = /^};/m.exec(html.slice(ah));
   const end = ah + m.index + 2;
   assert.ok(start > 0 && ah > start && end > ah, 'identity block found in index.html');
-  return 'let CUSTOMER = 7001;\n' + html.slice(start, end);
+  // the checkout seam: IDENTIFIED/PAY state, checkoutBody, renderPayChoice
+  const till = html.indexOf('// THE TILL');
+  let extra = '';
+  if (till > 0) {
+    const tm = /\n}\n/m.exec(html.slice(till));
+    extra = '\n' + html.slice(till, till + tm.index + 3);
+  }
+  return 'let CUSTOMER = 7001;\n' + html.slice(start, end) + extra;
 }
 
 function makeWorld({ storedToken, refreshAnswers, martWhoamiAnswers }) {
@@ -56,6 +63,7 @@ function makeWorld({ storedToken, refreshAnswers, martWhoamiAnswers }) {
     Promise, JSON, Number, String, Math, console,
     location: { hostname: 'mart.b4rruf3t.com' },
     crypto: { randomUUID: () => '00000000-0000-0000-0000-000000000000' },
+    uuid: () => '00000000-0000-0000-0000-000000000000',
     $: () => ({ textContent: '', style: {} }),
     document: { querySelector: () => null, querySelectorAll: () => [] },
   };
@@ -68,6 +76,10 @@ async function run(world) {
   vm.runInContext(identityScript(), world.sandbox);
   // let the promise chain settle
   for (let i = 0; i < 30; i++) await new Promise(r => setImmediate(r));
+  // `let` bindings live in the context's scope, not on the global object:
+  // ask the context for their values rather than reading sandbox props.
+  world.IDENTIFIED = vm.runInContext('IDENTIFIED', world.sandbox);
+  world.checkoutBody = v => JSON.parse(vm.runInContext('JSON.stringify(checkoutBody(' + JSON.stringify(v) + '))', world.sandbox));
 }
 
 test('expired stored token is exchanged for a fresh one before naming the customer', async () => {
@@ -119,4 +131,32 @@ test('dead token plus failed re-exchange leaves the anonymous shopper standing',
   await run(w);
   assert.equal(w.store.mart_customer ?? '7001', '7001',
     'no fresh token, no named customer: the anonymous shop works on');
+});
+
+// THE PAYMENT CHOICE · a signed-in estate shopper picks the rail their
+// purchase rides: "main acct" debits the bank statement, "credit card" rides
+// the card. Anonymous shoppers are never asked — the processor stands.
+test('an identified shopper choosing main acct sends pay=main with the order', async () => {
+  const w = makeWorld({
+    storedToken: 'good-token',
+    refreshAnswers: [],
+    martWhoamiAnswers: () => ({ ok: true, body: { customer: 10 } }),
+  });
+  await run(w);
+  assert.equal(w.IDENTIFIED, true, 'the page knows the shopper is their bank self');
+  const body = w.checkoutBody('v-focus-30');
+  assert.equal(body.pay, 'main', 'the default choice is the main account');
+  assert.equal(body.customer, '10');
+});
+
+test('choosing the card sends pay=card, and anonymous is never offered a choice', async () => {
+  const w = makeWorld({
+    storedToken: null,
+    refreshAnswers: [{ ok: false, body: null }],   // no estate cookie: anonymous
+    martWhoamiAnswers: () => ({ ok: true, body: { customer: null } }),
+  });
+  await run(w);
+  assert.equal(w.IDENTIFIED, false);
+  const body = w.checkoutBody('v-focus-30');
+  assert.equal('pay' in body, false, 'anonymous checkout carries no rail choice — psp stands');
 });
