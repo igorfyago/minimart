@@ -57,6 +57,7 @@ public final class MartApi {
         s.createContext("/api/catalog", MartApi::catalog);
         s.createContext("/api/whoami", MartApi::whoami);
         s.createContext("/api/checkout", MartApi::checkout);
+        s.createContext("/api/events", MartApi::events);
         s.createContext("/api/cart/checkout", MartApi::cartCheckout);
         s.createContext("/api/orders", MartApi::orders);
         s.createContext("/api/stock", MartApi::stock);
@@ -396,6 +397,52 @@ public final class MartApi {
             } else {
                 send(ex, 409, "{\"error\":\"" + Json.esc(((Checkout.Rejected) r).reason()) + "\"}");
             }
+        } catch (Exception e) {
+            send(ex, 500, err(e));
+        }
+    }
+
+    /**
+     * THE SHOP'S TAPE FEED · what just happened here, newest first, in a
+     * shape the estate tape can cross the screen with. Reads the outbox — the
+     * same table the relay ships to Kafka — so the feed is the shop's own
+     * history, not a second version of it.
+     */
+    public static String eventsFeed(int limit) throws Exception {
+        StringBuilder b = new StringBuilder("[");
+        boolean first = true;
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement(
+                     "SELECT event_key, payload, business_at FROM outbox ORDER BY id DESC LIMIT ?")) {
+            ps.setInt(1, Math.max(1, Math.min(limit, 50)));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String payload = rs.getString(2);
+                    String type = Json.str(payload, "type");
+                    if (type == null) continue;
+                    if (!first) b.append(',');
+                    first = false;
+                    b.append("{\"type\":\"").append(Json.esc(type)).append("\"");
+                    for (String k : new String[]{"orderId", "variant", "qty", "amount", "customer"}) {
+                        String v = Json.str(payload, k);
+                        if (v != null && "amount".equals(k))
+                            v = new java.math.BigDecimal(v).stripTrailingZeros().toPlainString();
+                        if (v != null) b.append(",\"").append(k).append("\":\"").append(Json.esc(v)).append("\"");
+                    }
+                    b.append(",\"at\":\"").append(rs.getTimestamp(3).toInstant()).append("\"}");
+                }
+            }
+        }
+        return b.append(']').toString();
+    }
+
+    private static void events(HttpExchange ex) throws IOException {
+        try {
+            String q = ex.getRequestURI().getQuery();
+            int limit = 20;
+            if (q != null && q.contains("limit="))
+                limit = Integer.parseInt(q.replaceAll(".*limit=(\\d+).*", "$1"));
+            send(ex, 200, eventsFeed(limit));
         } catch (Exception e) {
             send(ex, 500, err(e));
         }

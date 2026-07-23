@@ -938,6 +938,38 @@ if (pdClose) pdClose.onclick = closeProduct;
 const pdOverlay = document.querySelector('#pd-overlay');
 if (pdOverlay) pdOverlay.onclick = e => { if (e.target === pdOverlay) closeProduct(); };
 
+// THE TAPE, FED BY THE SHOP'S OWN HISTORY · /api/events is the outbox told
+// newest-first; the page walks it like the bank walks /api/xray/events,
+// crossing each fresh moment once. Your own checkout already crossed the
+// tape the second it happened — the feed is for the shop's OTHER moments:
+// the agents' orders, the renewals, the restocks.
+const TAPE_KINDS = {
+  'order.placed':        {icon: '🛒', words: e => 'order · ' + e.variant + ' ×' + (e.qty || 1), tone: 'neg', amt: e => e.amount ? '−€' + e.amount : null},
+  'subscription.started':{icon: '🔁', words: e => 'subscription started · ' + e.variant, tone: 'amb', amt: () => null},
+  'subscription.renewed':{icon: '🔁', words: e => 'subscription renewed · ' + e.variant, tone: 'neg', amt: e => e.amount ? '−€' + e.amount : null},
+  'subscription.churned':{icon: '👋', words: e => 'subscription ended · ' + e.variant, tone: 'amb', amt: () => null},
+  'stock.received':      {icon: '🏪', words: e => 'restock · ' + (e.variant || 'the shelf'), tone: 'pos', amt: () => null},
+};
+let tapeFeedSeen = new Set();
+let tapeFeedFirst = true;
+async function tapeFeedTick() {
+  if (typeof ecoTick !== 'function') return;
+  let evs;
+  try { evs = await fetch('/api/events?limit=15').then(r => r.json()); }
+  catch (e) { return; }
+  if (!Array.isArray(evs)) return;
+  const fresh = evs.filter(e => !tapeFeedSeen.has(e.type + (e.orderId || '') + e.at));
+  fresh.forEach(e => tapeFeedSeen.add(e.type + (e.orderId || '') + e.at));
+  if (tapeFeedSeen.size > 2000) tapeFeedSeen = new Set([...tapeFeedSeen].slice(-1000));
+  if (tapeFeedFirst) { tapeFeedFirst = false; return; }   // history is not news
+  fresh.sort((a, b) => new Date(a.at) - new Date(b.at)).slice(0, 3).forEach(e => {
+    const k = TAPE_KINDS[e.type];
+    if (k) ecoTick(k.icon, 'helix · ' + k.words(e), k.amt(e), k.tone);
+  });
+}
+setInterval(tapeFeedTick, 5000);
+setTimeout(tapeFeedTick, 1500);
+
 // ---- your orders: the order from our books, the parcel from freight's ----
 
 // THE ESTATE TAPE, FED BY THE SHOP · the bar at the top owns the markee at
