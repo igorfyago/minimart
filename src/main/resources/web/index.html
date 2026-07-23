@@ -961,11 +961,16 @@ async function tapeFeedTick() {
   const fresh = evs.filter(e => !tapeFeedSeen.has(e.type + (e.orderId || '') + e.at));
   fresh.forEach(e => tapeFeedSeen.add(e.type + (e.orderId || '') + e.at));
   if (tapeFeedSeen.size > 2000) tapeFeedSeen = new Set([...tapeFeedSeen].slice(-1000));
-  if (tapeFeedFirst) { tapeFeedFirst = false; return; }   // history is not news
-  fresh.sort((a, b) => new Date(a.at) - new Date(b.at)).slice(0, 3).forEach(e => {
-    const k = TAPE_KINDS[e.type];
-    if (k) ecoTick(k.icon, 'helix · ' + k.words(e), k.amt(e), k.tone);
-  });
+  // On arrival the LAST FEW MINUTES are still news: a guest who never sees
+  // the tape move concludes there is no tape. Everything older is history.
+  const cutoff = Date.now() - (tapeFeedFirst ? 3 * 60 * 1000 : 0);
+  tapeFeedFirst = false;
+  fresh.sort((a, b) => new Date(a.at) - new Date(b.at))
+    .filter(e => new Date(e.at).getTime() >= cutoff)
+    .slice(0, 3).forEach(e => {
+      const k = TAPE_KINDS[e.type];
+      if (k) ecoTick(k.icon, 'helix · ' + k.words(e), k.amt(e), k.tone);
+    });
 }
 setInterval(tapeFeedTick, 5000);
 setTimeout(tapeFeedTick, 1500);

@@ -38,3 +38,12 @@ test('T7 · reviews are shown and honestly labeled as the agents\' own', () => {
   const near = html.slice(html.indexOf('REVIEWS'), html.indexOf('REVIEWS') + 1200);
   assert.ok(/agent|simulated|seeded/i.test(near), 'and the label says whose opinions they are');
 });
+
+test('the guest gets the tape too: arrival replays the last few minutes, not silence', () => {
+  assert.ok(html.includes('tapeFeedFirst'), 'the walker tracks arrival');
+  const tick = html.slice(html.indexOf('async function tapeFeedTick'),
+                          html.indexOf('async function tapeFeedTick') + 1400);
+  assert.ok(tick.includes('3 * 60 * 1000'), 'recent history still counts as news on arrival');
+  assert.ok(!tick.includes('if (tapeFeedFirst) { tapeFeedFirst = false; return; }'),
+    'the first poll no longer swallows everything — a guest on a quiet shop still sees the tape');
+});
