@@ -773,6 +773,10 @@ async function payNow() {
     co('#co-receipt').innerHTML = `<div class="big">✅</div>
       <h3>${money(r.amount)} · paid via ${rail}</h3>
       <div class="muted">${cartCount()} item(s) · watch them ship under Your orders</div>`;
+    ecoTick(IDENTIFIED && PAY === 'card' ? '💳' : IDENTIFIED ? '🏦' : '🧾',
+            'minimart · ' + (IDENTIFIED ? (PAY === 'main' ? 'account charged' : 'card captured') : 'payment captured')
+            + ' · ' + cartCount() + ' item(s)',
+            '−' + money(r.amount), 'neg');
     CART = {}; syncCartBadge();
     loadProducts(); loadMyOrders();
   } catch (e) {
@@ -797,6 +801,12 @@ const contBtn = co('#co-continue');
 if (contBtn) contBtn.onclick = closeCart;
 
 // ---- your orders: the order from our books, the parcel from freight's ----
+
+// THE ESTATE TAPE, FED BY THE SHOP · the bar at the top owns the markee at
+// the bottom (eco-nav.js); the shop puts its money moments on it in the
+// shop's own words. A page that never dispatches eco:tick simply stays silent.
+const ecoTick = (icon, text, amount, tone) =>
+  document.dispatchEvent(new CustomEvent('eco:tick', {detail: {icon, text, amount, tone}}));
 
 const PARCEL_STEPS = ['requested', 'labelled', 'in_transit', 'delivered'];
 const PARCEL_WORDS = {requested: 'preparing', labelled: 'label printed', in_transit: 'on its way', delivered: 'delivered'};
@@ -847,6 +857,15 @@ async function loadMyOrders() {
     if (!d.orders.length) { el.innerHTML = '<div class="muted">nothing yet · buy something above</div>'; return; }
     el.innerHTML = d.orders.map(o => {
       const [line, color] = buyerLine(o);
+      // a parcel that just arrived is a money moment worth the tape: once per
+      // order per browser, not on every poll
+      if (o.shipment && o.shipment.state === 'delivered') {
+        const seen = JSON.parse(localStorage.getItem('mart_taped') || '[]');
+        if (!seen.includes(o.id)) {
+          seen.push(o.id); localStorage.setItem('mart_taped', JSON.stringify(seen.slice(-50)));
+          ecoTick('📦', 'minimart · ' + o.title + ' delivered', money(o.amount), 'pos');
+        }
+      }
       return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
         + '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">'
         + '<b>' + o.title + '</b>'
