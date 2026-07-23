@@ -353,17 +353,37 @@ fetch(AUTH + '/v1/whoami', {credentials: 'include'})
     // With a token in hand, the SHOP's own whoami names the real customer:
     // the estate-signed-in shopper IS the bank customer, and from here on
     // the page's orders, checkouts and card charges all land on that person.
+    // A stored token proves nothing by existing: access tokens expire, and a
+    // dead token left over from yesterday's visit reads exactly like a live
+    // one. If the shop can't name us while we hold one, exchange the estate
+    // cookie for a fresh token once and ask again — the 2026-07-23 break was
+    // this path missing, and expired-token shoppers rode psp anonymously.
+    const exchange = () => fetch(AUTH + '/v1/tokens/refresh', {method: 'POST', credentials: 'include'})
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d) return false;
+        localStorage.setItem('b4rruf3t_token', d.access_token);
+        localStorage.setItem('b4rruf3t_refresh', d.refresh_token);
+        return true;
+      })
+      .catch(() => false);
+    const askShop = () => fetch('/api/whoami', {headers: authHeaders()})
+      .then(r => r.ok ? r.json() : null)
+      .catch(() => null);
+    const name = w => {
+      if (!w || w.customer == null) return false;
+      CUSTOMER = w.customer;
+      localStorage.setItem('mart_customer', String(CUSTOMER));
+      $('#shopper').textContent = (u.name || 'you') + ' · customer ' + CUSTOMER;
+      return true;
+    };
     ensureToken.then(ok => {
       if (!ok) return;
-      fetch('/api/whoami', {headers: authHeaders()})
-        .then(r => r.ok ? r.json() : null)
-        .then(w => {
-          if (!w || w.customer == null) return;
-          CUSTOMER = w.customer;
-          localStorage.setItem('mart_customer', String(CUSTOMER));
-          $('#shopper').textContent = (u.name || 'you') + ' · customer ' + CUSTOMER;
-        })
-        .catch(() => {});
+      askShop().then(w => {
+        if (name(w)) return;
+        // the shop couldn't name us: the token is dead, not the estate login.
+        exchange().then(again => { if (again) askShop().then(name); });
+      });
     });
   })
   .catch(() => {});                       // auth down: the anonymous shop works on
