@@ -45,10 +45,12 @@ public final class EstateIdentity {
 
     private EstateIdentity() {}
 
-    /** Where the bank answers /api/whois. Overridable: tests point it at a
-     *  bank that is not there. */
+    /** Where the bank answers /api/whois. Same fallback as Checkout: the
+     *  compose's MINIBANK_ISSUER_URL names the same host. Overridable for
+     *  tests. */
     public static volatile String bankBaseUrl =
-            System.getenv().getOrDefault("MINIBANK_URL", "http://localhost:8080");
+            System.getenv().getOrDefault("MINIBANK_URL",
+                    System.getenv().getOrDefault("MINIBANK_ISSUER_URL", "http://localhost:8080"));
 
     private static final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofMillis(800)).build();

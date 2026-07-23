@@ -169,10 +169,12 @@ public final class Checkout {
         return new Placed(orderId, pi, ok.amount());
     }
 
-    /** Where the card rail lives. Overridable for the same reason payBaseUrl
-     *  is: a test points it at a bank that is not there. */
+    /** Where the bank answers /api/card/charge. MINIBANK_URL first; the
+     *  compose's MINIBANK_ISSUER_URL names the same host and is honoured so
+     *  an existing deployment needs no new variable. */
     public static volatile String bankBaseUrl =
-            System.getenv().getOrDefault("MINIBANK_URL", "http://localhost:8080");
+            System.getenv().getOrDefault("MINIBANK_URL",
+                    System.getenv().getOrDefault("MINIBANK_ISSUER_URL", "http://localhost:8080"));
 
     /**
      * THE FULL CIRCLE · reserve the goods, then charge the customer's REAL
