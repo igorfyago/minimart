@@ -23,12 +23,12 @@ function identityScript() {
   const m = /^};/m.exec(html.slice(ah));
   const end = ah + m.index + 2;
   assert.ok(start > 0 && ah > start && end > ah, 'identity block found in index.html');
-  // the checkout seam: IDENTIFIED/PAY state, checkoutBody, renderPayChoice
-  const till = html.indexOf('// THE TILL');
+  // the cart seam: state + line math + the checkout body
+  const cart = html.indexOf('// THE CART');
   let extra = '';
-  if (till > 0) {
-    const tm = /\n}\n/m.exec(html.slice(till));
-    extra = '\n' + html.slice(till, till + tm.index + 3);
+  if (cart > 0) {
+    const cm = /\n};\n/m.exec(html.slice(cart));
+    extra = '\n' + html.slice(cart, cart + cm.index + 3);
   }
   return 'let CUSTOMER = 7001;\n' + html.slice(start, end) + extra;
 }
@@ -79,7 +79,7 @@ async function run(world) {
   // `let` bindings live in the context's scope, not on the global object:
   // ask the context for their values rather than reading sandbox props.
   world.IDENTIFIED = vm.runInContext('IDENTIFIED', world.sandbox);
-  world.checkoutBody = v => JSON.parse(vm.runInContext('JSON.stringify(checkoutBody(' + JSON.stringify(v) + '))', world.sandbox));
+  world.checkoutBody = () => JSON.parse(vm.runInContext('JSON.stringify(checkoutBody())', world.sandbox));
 }
 
 test('expired stored token is exchanged for a fresh one before naming the customer', async () => {
@@ -144,7 +144,9 @@ test('an identified shopper choosing main acct sends pay=main with the order', a
   });
   await run(w);
   assert.equal(w.IDENTIFIED, true, 'the page knows the shopper is their bank self');
-  const body = w.checkoutBody('v-focus-30');
+  w.eval = s => vm.runInContext(s, w.sandbox);
+  w.eval('addToCart({id:"v-focus-30", title:"Focus Stack", price:"89"})');
+  const body = w.checkoutBody();
   assert.equal(body.pay, 'main', 'the default choice is the main account');
   assert.equal(body.customer, '10');
 });
@@ -157,6 +159,47 @@ test('choosing the card sends pay=card, and anonymous is never offered a choice'
   });
   await run(w);
   assert.equal(w.IDENTIFIED, false);
-  const body = w.checkoutBody('v-focus-30');
+  w.eval = s => vm.runInContext(s, w.sandbox);
+  w.eval('addToCart({id:"v-focus-30", title:"Focus Stack", price:"89"})');
+  const body = w.checkoutBody();
   assert.equal('pay' in body, false, 'anonymous checkout carries no rail choice — psp stands');
+});
+
+// THE REAL CHECKOUT · a cart, a summary, a deliberate payment method, one
+// Pay button. The rail choice moved OUT of the shop header into the checkout
+// where a shopper actually makes it.
+test('the cart totals lines and the checkout body carries every line', async () => {
+  const w = makeWorld({
+    storedToken: 'good-token',
+    refreshAnswers: [],
+    martWhoamiAnswers: () => ({ ok: true, body: { customer: 10 } }),
+  });
+  await run(w);
+  const cart = vm => vm;
+  // two of one product, one of another
+  w.eval = s => vm.runInContext(s, w.sandbox);
+  w.eval('CART = {}; addToCart({id:"v-focus-30", price:"89"}); addToCart({id:"v-focus-30", price:"89"}); addToCart({id:"v-sleep-30", price:"69"});');
+  const total = w.eval('cartTotal()');
+  assert.equal(total, '247.00', '2×89 + 1×69 · got ' + total);
+  const lines = JSON.parse(w.eval('JSON.stringify(cartLines())'));
+  assert.equal(lines.length, 2, 'same product folds into one line');
+  assert.equal(lines.find(l => l.variant === 'v-focus-30').qty, 2);
+  const body = JSON.parse(w.eval('JSON.stringify(checkoutBody())'));
+  assert.deepEqual(body.lines.map(l => [l.variant, l.qty]).sort(),
+    [['v-focus-30', 2], ['v-sleep-30', 1]].sort());
+  assert.equal(body.pay, 'main', 'the chosen method rides the body');
+  assert.equal(body.customer, '10');
+});
+
+test('switching the method inside checkout to card changes the body, not the header', async () => {
+  const w = makeWorld({
+    storedToken: 'good-token',
+    refreshAnswers: [],
+    martWhoamiAnswers: () => ({ ok: true, body: { customer: 10 } }),
+  });
+  await run(w);
+  w.eval = s => vm.runInContext(s, w.sandbox);
+  w.eval('addToCart({id:"v-starter-14", title:"Starter", price:"29"}); setPay("card");');
+  const body = JSON.parse(w.eval('JSON.stringify(checkoutBody())'));
+  assert.equal(body.pay, 'card');
 });

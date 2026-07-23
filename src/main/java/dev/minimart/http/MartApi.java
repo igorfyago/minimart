@@ -57,6 +57,7 @@ public final class MartApi {
         s.createContext("/api/catalog", MartApi::catalog);
         s.createContext("/api/whoami", MartApi::whoami);
         s.createContext("/api/checkout", MartApi::checkout);
+        s.createContext("/api/cart/checkout", MartApi::cartCheckout);
         s.createContext("/api/orders", MartApi::orders);
         s.createContext("/api/stock", MartApi::stock);
         s.createContext("/api/sim/tick", MartApi::tick);
@@ -390,6 +391,58 @@ public final class MartApi {
             if (r instanceof Checkout.Placed p) {
                 send(ex, 200, "{\"orderId\":\"" + p.orderId() + "\",\"payment_intent\":\"" + p.paymentIntentId() +
                         "\",\"amount\":\"" + p.amount().stripTrailingZeros().toPlainString() + "\",\"state\":\"reserved\"}");
+            } else {
+                send(ex, 409, "{\"error\":\"" + Json.esc(((Checkout.Rejected) r).reason()) + "\"}");
+            }
+        } catch (Exception e) {
+            send(ex, 500, err(e));
+        }
+    }
+
+    /**
+     * THE BASKET, OVER THE WIRE · one group checkout for many lines.
+     *
+     * Body: {orderId (the group), tenant, customer, pay, lines:[{variant,qty}]}.
+     * The identity rules are the single-line checkout's own: the token names
+     * the customer, never the body, and the rail is the identified shopper's
+     * choice or the processor for everyone else. Each line is parsed as its
+     * own variant/qty pair; a line without both is a 400, not a guess.
+     */
+    private static void cartCheckout(HttpExchange ex) throws IOException {
+        try {
+            if (!"POST".equals(ex.getRequestMethod())) { send(ex, 405, "{\"error\":\"POST only\"}"); return; }
+            String body = read(ex);
+            String groupId = Json.str(body, "orderId");
+            String tenant = Json.str(body, "tenant");
+            String customer = Json.str(body, "customer");
+            String location = Json.str(body, "location");
+            if (groupId == null || tenant == null || customer == null) {
+                send(ex, 400, "{\"error\":\"need orderId, tenant, customer, lines\"}"); return;
+            }
+            java.util.List<String> variants = Json.each(body, "variant");
+            java.util.List<String> qtys = Json.each(body, "qty");
+            if (variants.isEmpty() || variants.size() != qtys.size()) {
+                send(ex, 400, "{\"error\":\"every line needs variant and qty\"}"); return;
+            }
+            java.util.List<Checkout.Line> lines = new java.util.ArrayList<>();
+            for (int i = 0; i < variants.size(); i++)
+                lines.add(new Checkout.Line(variants.get(i), Long.parseLong(qtys.get(i))));
+
+            String auth = ex.getRequestHeaders().getFirst("Authorization");
+            long actingCustomer = CallerIdentity.resolve(identity, auth, Long.parseLong(customer));
+            boolean identified = identity.customerFor(auth).isPresent();
+            String pay = Json.str(body, "pay");
+            String rail = identified ? ("main".equals(pay) ? "bank_main" : "bank_card") : "psp";
+
+            Checkout.Result r = Checkout.placeCart(UUID.fromString(groupId), tenant, actingCustomer,
+                    lines, location == null ? "MAD" : location, businessAt(body), rail);
+            if (r instanceof Checkout.CartPlaced p) {
+                StringBuilder ids = new StringBuilder("[");
+                for (int i = 0; i < p.orderIds().size(); i++)
+                    ids.append(i == 0 ? "\"" + p.orderIds().get(i) + "\"" : ",\"" + p.orderIds().get(i) + "\"");
+                send(ex, 200, "{\"orderId\":\"" + p.groupId() + "\",\"payment_intent\":\"" + p.reference()
+                        + "\",\"amount\":\"" + p.amount().stripTrailingZeros().toPlainString()
+                        + "\",\"state\":\"reserved\",\"orders\":" + ids.append(']') + "}");
             } else {
                 send(ex, 409, "{\"error\":\"" + Json.esc(((Checkout.Rejected) r).reason()) + "\"}");
             }

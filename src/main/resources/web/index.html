@@ -151,6 +151,57 @@
   .prov { font-size:10px; letter-spacing:.5px; padding:2px 6px; border-radius:4px;
           border:1px solid var(--line); color:var(--dim); }
   .prov.MEASURED { border-color:#3fb95055; color:var(--green); }
+
+  /* ------------------------------------------------------ cart & checkout
+     The panel floats over the shop; everything inside is one column, one
+     decision per screen: review, choose the rail, pay, receipt. */
+  .cart-btn { background:var(--accent); border:none; color:#fff; padding:6px 16px;
+              border-radius:999px; font:600 13px system-ui; cursor:pointer; }
+  .cart-count { display:inline-block; min-width:18px; text-align:center; background:#ffffff2e;
+                border-radius:999px; padding:0 5px; margin-left:4px; font-size:11px; }
+  #cart-overlay { position:fixed; inset:0; background:rgba(4,8,14,.66); backdrop-filter:blur(3px);
+                  z-index:50; display:flex; align-items:flex-start; justify-content:flex-end; }
+  #cart-overlay.hidden { display:none; }
+  .co-panel { width:min(440px, 100vw); height:100%; overflow-y:auto; background:var(--bg);
+              border-left:1px solid var(--line); padding:22px; animation:co-in .18s ease-out; }
+  @keyframes co-in { from { transform:translateX(24px); opacity:.4; } to { transform:none; opacity:1; } }
+  .co-head { display:flex; align-items:center; margin-bottom:18px; }
+  .co-title { font-size:20px; font-weight:750; letter-spacing:-.3px; }
+  .co-head .mini { margin-left:auto; }
+  .co-line { display:flex; gap:12px; align-items:center; padding:12px 0; border-bottom:1px solid var(--line); }
+  .co-line-art { width:44px; height:44px; border-radius:10px; display:grid; place-items:center;
+                 font-size:20px; flex:none; }
+  .co-line-main { flex:1; min-width:0; }
+  .co-line-name { font-weight:650; font-size:13.5px; }
+  .co-line-price { color:var(--dim); font-size:12px; }
+  .co-qty { display:flex; align-items:center; gap:8px; }
+  .co-qty button { width:24px; height:24px; border-radius:7px; border:1px solid var(--line);
+                   background:none; color:var(--text); cursor:pointer; font:600 13px system-ui; }
+  .co-qty button:hover { border-color:var(--violet); color:var(--violet); }
+  .co-line-total { width:64px; text-align:right; font-variant-numeric:tabular-nums; font-weight:650; }
+  .co-total-row { display:flex; justify-content:space-between; padding:16px 0; font-weight:700;
+                  font-size:15px; }
+  .co-cta { width:100%; padding:12px; font-size:14px; }
+  .co-summary { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+                padding:12px 14px; margin-bottom:14px; font-size:12.5px; }
+  .co-summary .row { display:flex; justify-content:space-between; padding:3px 0; color:var(--dim); }
+  .co-summary .row.total { color:var(--text); font-weight:700; border-top:1px solid var(--line);
+                           margin-top:6px; padding-top:8px; }
+  .co-method { display:flex; gap:12px; align-items:center; width:100%; text-align:left;
+               background:var(--panel); border:1px solid var(--line); border-radius:10px;
+               padding:13px 14px; margin-bottom:8px; cursor:pointer; color:var(--text);
+               font:13px system-ui; transition:border-color .15s; }
+  .co-method:hover { border-color:var(--violet); }
+  .co-method.on { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  .co-method-icon { width:34px; height:34px; border-radius:9px; display:grid; place-items:center;
+                    font-size:16px; flex:none; }
+  .co-method-name { font-weight:650; }
+  .co-method-sub { color:var(--dim); font-size:11.5px; }
+  .co-method-tick { margin-left:auto; color:var(--accent); font-weight:700; }
+  .co-receipt { text-align:center; padding:18px 0 8px; }
+  .co-receipt .big { font-size:42px; margin-bottom:8px; }
+  .co-receipt h3 { font-size:17px; font-weight:700; margin-bottom:6px; }
+  .co-receipt .muted { margin-bottom:0; }
 </style>
 </head>
 <body>
@@ -188,12 +239,8 @@
       </div>
       <div class="shop-meta">
         <span class="pill" id="shopper">you are customer</span>
-        <span id="pay-choice" class="hidden" style="gap:6px;align-items:center">
-          <span class="muted" style="font-size:12px">pay with</span>
-          <button class="mini" data-pay="main">main acct</button>
-          <button class="mini" data-pay="card">credit card</button>
-        </span>
         <button class="mini" id="refresh-shop">Refresh</button>
+        <button class="cart-btn" id="cart-open">Cart <span id="cart-count" class="cart-count hidden">0</span></button>
       </div>
     </div>
 
@@ -217,6 +264,39 @@
         checked once under a row lock. Overselling is not defended against here, it is impossible to express.</div>
     </div>
   </section>
+
+  <!-- ================= CART & CHECKOUT =================
+       A real checkout: the basket reviews itself, the shopper chooses how the
+       money moves with the full price in front of them, and one button pays. -->
+  <div id="cart-overlay" class="hidden">
+    <div class="co-panel">
+      <div class="co-head">
+        <div class="co-title" id="co-title">Your cart</div>
+        <button class="mini" id="cart-close">✕</button>
+      </div>
+
+      <div id="co-cart-view">
+        <div id="co-lines"></div>
+        <div class="co-total-row" id="co-total-row">
+          <span>Total</span><span class="co-total" id="co-total"></span>
+        </div>
+        <button class="primary co-cta" id="co-to-checkout">Go to checkout</button>
+      </div>
+
+      <div id="co-pay-view" class="hidden">
+        <div class="co-summary" id="co-summary"></div>
+        <div class="co-methods" id="co-methods"></div>
+        <div class="muted" id="co-method-note" style="margin:10px 0 14px"></div>
+        <button class="primary co-cta" id="co-pay"></button>
+        <button class="ghost" id="co-back" style="width:100%;margin-top:8px">Back to cart</button>
+      </div>
+
+      <div id="co-done-view" class="hidden">
+        <div class="co-receipt" id="co-receipt"></div>
+        <button class="primary co-cta" id="co-continue">Continue shopping</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ================= OPERATIONS ================= -->
   <section id="ops" class="hidden">
@@ -381,7 +461,6 @@ fetch(AUTH + '/v1/whoami', {credentials: 'include'})
       IDENTIFIED = true;
       localStorage.setItem('mart_customer', String(CUSTOMER));
       $('#shopper').textContent = (u.name || 'you') + ' · customer ' + CUSTOMER;
-      renderPayChoice();
       return true;
     };
     ensureToken.then(ok => {
@@ -399,27 +478,30 @@ const authHeaders = () => {
   return t ? {'Authorization': 'Bearer ' + t} : {};
 };
 
-// THE TILL'S QUESTION · main acct or credit card. Only an estate-identified
-// shopper is ever asked: their purchase rides their bank either way, and the
-// choice is which surface shows it — the EUR statement (main) or the card
-// activity (credit). Anonymous shoppers keep the processor and never see this.
+// THE CART · a basket the shopper builds, reviews, and pays once. The rail
+// is chosen in the checkout, with the total in view — never in the header.
 let IDENTIFIED = false;
 let PAY = 'main';
-const checkoutBody = variant => {
+let CART = {};   // variant -> {id, title, price, qty}
+const cartLines = () => Object.values(CART)
+  .map(l => ({variant: l.id, qty: l.qty, title: l.title, price: Number(l.price)}));
+const cartTotal = () => cartLines()
+  .reduce((s, l) => s + l.price * l.qty, 0).toFixed(2);
+const cartCount = () => cartLines().reduce((s, l) => s + l.qty, 0);
+function addToCart(p) {
+  const l = CART[p.id] || (CART[p.id] = {id: p.id, title: p.title, price: p.price, qty: 0});
+  l.qty++;
+}
+function setQty(variant, qty) {
+  if (qty <= 0) delete CART[variant]; else CART[variant].qty = qty;
+}
+function setPay(m) { PAY = m; }
+const checkoutBody = () => {
   const body = {orderId: uuid(), tenant: 'helix', customer: String(CUSTOMER),
-                variant, location: 'MAD', qty: 1};
+                location: 'MAD', lines: cartLines().map(l => ({variant: l.variant, qty: l.qty}))};
   if (IDENTIFIED) body.pay = PAY;
   return body;
 };
-function renderPayChoice() {
-  const el = document.querySelector('#pay-choice');
-  if (!el) return;
-  el.classList.toggle('hidden', !IDENTIFIED);
-  el.querySelectorAll('button[data-pay]').forEach(b => {
-    b.classList.toggle('on', b.dataset.pay === PAY);
-    b.onclick = () => { PAY = b.dataset.pay; renderPayChoice(); };
-  });
-}
 
 const refresh = document.querySelector('#refresh-shop');
 if (refresh) refresh.onclick = () => loadProducts();
@@ -471,11 +553,17 @@ async function loadProducts() {
           <span class="prod-per">${d.per}</span>
         </div>
         <button class="buy" data-v="${p.id}" ${p.onHand <= 0 ? 'disabled' : ''}>
-          ${p.onHand <= 0 ? 'Sold out' : 'Buy one'}</button>
+          ${p.onHand <= 0 ? 'Sold out' : 'Add to cart'}</button>
       </div>
     </div>`;
   }).join('');
-  document.querySelectorAll('button.buy[data-v]').forEach(b => b.onclick = () => buy(b.dataset.v, b));
+  document.querySelectorAll('button.buy[data-v]').forEach(b => b.onclick = () => {
+    const p = items.find(x => x.id === b.dataset.v);
+    addToCart({id: p.id, title: describe(p.title).name, price: p.price});
+    syncCartBadge();
+    b.textContent = 'In cart ✓';
+    setTimeout(() => { b.textContent = 'Add to cart'; }, 900);
+  });
   $('#shopper').textContent = 'customer ' + CUSTOMER;
 }
 
@@ -496,24 +584,131 @@ function describe(title) {
   return {name, per, blurb: key ? blurbs[key] : 'A single item, shipped once.'};
 }
 
-async function buy(variant, btn) {
+// ---- cart & checkout: the panel, the flow, the receipt ----
+
+const co = id => document.querySelector(id);
+function openCart() {
+  renderCart();
+  co('#cart-overlay').classList.remove('hidden');
+}
+function closeCart() { co('#cart-overlay').classList.add('hidden'); }
+
+function renderCart() {
+  co('#co-cart-view').classList.remove('hidden');
+  co('#co-pay-view').classList.add('hidden');
+  co('#co-done-view').classList.add('hidden');
+  co('#co-title').textContent = 'Your cart';
+  const lines = cartLines();
+  co('#co-lines').innerHTML = lines.length ? lines.map(l => {
+    const art = artFor(l.variant, l.title || '');
+    return `<div class="co-line">
+      <div class="co-line-art" style="background:${art.bg}">${art.glyph}</div>
+      <div class="co-line-main">
+        <div class="co-line-name">${l.title || l.variant}</div>
+        <div class="co-line-price">${money(l.price)} each</div>
+      </div>
+      <div class="co-qty">
+        <button data-act="dec" data-v="${l.variant}">−</button>
+        <span>${l.qty}</span>
+        <button data-act="inc" data-v="${l.variant}">+</button>
+      </div>
+      <div class="co-line-total">${money(l.price * l.qty)}</div>
+    </div>`;
+  }).join('') : '<div class="muted" style="padding:18px 0">Nothing here yet — add something from the shelf.</div>';
+  const has = lines.length > 0;
+  co('#co-total-row').style.display = has ? '' : 'none';
+  co('#co-total').textContent = money(cartTotal());
+  const cta = co('#co-to-checkout');
+  cta.style.display = has ? '' : 'none';
+  co('#co-lines').querySelectorAll('button[data-act]').forEach(b => b.onclick = () => {
+    const v = b.dataset.v;
+    setQty(v, (CART[v] ? CART[v].qty : 0) + (b.dataset.act === 'inc' ? 1 : -1));
+    syncCartBadge(); renderCart();
+  });
+}
+
+function syncCartBadge() {
+  const n = cartCount();
+  const badge = co('#cart-count');
+  badge.textContent = n;
+  badge.classList.toggle('hidden', n === 0);
+}
+
+function renderCheckout() {
+  co('#co-cart-view').classList.add('hidden');
+  co('#co-pay-view').classList.remove('hidden');
+  co('#co-title').textContent = 'Checkout';
+  const lines = cartLines();
+  co('#co-summary').innerHTML = lines.map(l =>
+      `<div class="row"><span>${l.qty} × ${l.title || l.variant}</span><span>${money(l.price * l.qty)}</span></div>`).join('')
+    + `<div class="row total"><span>Total</span><span>${money(cartTotal())}</span></div>`;
+  // The methods the shopper may pick. An estate shopper's money lives at the
+  // bank: the statement (main) or the card. Everyone else pays the processor.
+  const methods = IDENTIFIED ? [
+    {id: 'main', icon: '🏦', name: 'Main account', sub: 'Debited from your minibank balance · shows in Transactions', bg: '#58a6ff22'},
+    {id: 'card', icon: '💳', name: 'Credit card', sub: 'Your minibank card · shows under Card at the bank', bg: '#bc8cff22'},
+  ] : [
+    {id: 'psp', icon: '🧾', name: 'minipay', sub: 'The estate processor · card-free checkout', bg: '#3fb95022'},
+  ];
+  if (!methods.some(m => m.id === PAY)) PAY = methods[0].id;
+  co('#co-methods').innerHTML = methods.map(m => `
+    <button class="co-method ${m.id === PAY ? 'on' : ''}" data-m="${m.id}">
+      <span class="co-method-icon" style="background:${m.bg}">${m.icon}</span>
+      <span><div class="co-method-name">${m.name}</div><div class="co-method-sub">${m.sub}</div></span>
+      ${m.id === PAY ? '<span class="co-method-tick">✓</span>' : ''}
+    </button>`).join('');
+  co('#co-methods').querySelectorAll('.co-method').forEach(b => b.onclick = () => { setPay(b.dataset.m); renderCheckout(); });
+  co('#co-method-note').textContent = IDENTIFIED
+    ? 'Charged as customer ' + CUSTOMER + ' · the money moves at your bank, the shop never holds it.'
+    : 'Signed-out checkout · sign in through the estate bar to pay from your bank.';
+  co('#co-pay').textContent = 'Pay ' + money(cartTotal());
+}
+
+async function payNow() {
+  const btn = co('#co-pay');
   btn.disabled = true; btn.textContent = 'Reserving…';
-  const body = checkoutBody(variant);
-  const orderId = body.orderId;
+  const body = checkoutBody();
   try {
-    const r = await fetch('/api/checkout', {
+    const r = await fetch('/api/cart/checkout', {
       method: 'POST', headers: {'Content-Type': 'application/json', ...authHeaders()},
       body: JSON.stringify(body)
     }).then(r => r.json());
-    if (r.error) { toast('Declined: ' + r.error); }
-    else {
-      btn.textContent = 'Paying…';
-      await fetch('/api/orders/' + orderId + '/ship', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
-      toast('Paid. Watch it ship under Your orders.');
-    }
-  } catch (e) { toast('Something went wrong: ' + e.message); }
-  loadProducts(); loadMyOrders();
+    if (r.error) { toast('Declined: ' + r.error); btn.disabled = false; btn.textContent = 'Pay ' + money(cartTotal()); return; }
+    btn.textContent = 'Shipping…';
+    for (const id of r.orders || [])
+      await fetch('/api/orders/' + id + '/ship', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+    // the receipt: what was bought, what it cost, where the money went
+    const rail = IDENTIFIED ? (PAY === 'main' ? 'Main account · see Transactions at the bank'
+                                             : 'Credit card · see Card at the bank')
+                            : 'minipay';
+    co('#co-pay-view').classList.add('hidden');
+    co('#co-done-view').classList.remove('hidden');
+    co('#co-title').textContent = 'Order placed';
+    co('#co-receipt').innerHTML = `<div class="big">✅</div>
+      <h3>${money(r.amount)} · paid via ${rail}</h3>
+      <div class="muted">${cartCount()} item(s) · watch them ship under Your orders</div>`;
+    CART = {}; syncCartBadge();
+    loadProducts(); loadMyOrders();
+  } catch (e) {
+    toast('Something went wrong: ' + e.message);
+    btn.disabled = false; btn.textContent = 'Pay ' + money(cartTotal());
+  }
 }
+
+const cartBtn = co('#cart-open');
+if (cartBtn) cartBtn.onclick = openCart;
+const closeBtn = co('#cart-close');
+if (closeBtn) closeBtn.onclick = closeCart;
+const overlay = co('#cart-overlay');
+if (overlay) overlay.onclick = e => { if (e.target === overlay) closeCart(); };
+const toCheckout = co('#co-to-checkout');
+if (toCheckout) toCheckout.onclick = renderCheckout;
+const backBtn = co('#co-back');
+if (backBtn) backBtn.onclick = renderCart;
+const payBtn = co('#co-pay');
+if (payBtn) payBtn.onclick = payNow;
+const contBtn = co('#co-continue');
+if (contBtn) contBtn.onclick = closeCart;
 
 // ---- your orders: the order from our books, the parcel from freight's ----
 

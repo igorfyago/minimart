@@ -12,6 +12,7 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -49,7 +50,7 @@ import java.util.UUID;
  */
 public final class Checkout {
 
-    public sealed interface Result permits Placed, Rejected {}
+    public sealed interface Result permits Placed, Rejected, CartPlaced {}
     public record Placed(UUID orderId, String paymentIntentId, BigDecimal amount) implements Result {}
     public record Rejected(String reason) implements Result {}
 
@@ -177,25 +178,6 @@ public final class Checkout {
             System.getenv().getOrDefault("MINIBANK_URL",
                     System.getenv().getOrDefault("MINIBANK_ISSUER_URL", "http://localhost:8080"));
 
-    /**
-     * THE FULL CIRCLE · reserve the goods, then charge the customer's REAL
-     * card at the bank. The money never touches this shop's own ledger:
-     * payment_mode "bank_card" carries stock-only legs, exactly like the psp
-     * path, because the charge lives where the customer can see it — their
-     * bank statement, next to everything else they bought.
-     *
-     * The discipline is the one this class already keeps: the call is
-     * journalled BEFORE it goes out, the authorization reference is derived
-     * from the order id (a retried checkout re-asks the same money), a
-     * refused charge gives the goods back, and a maybe is written down as a
-     * maybe — never filed as "no charge exists".
-     */
-    private static Result placeOnBankCard(UUID orderId, String tenant, long customerId,
-                                          String variantId, String location, long qty,
-                                          Instant businessAt) throws SQLException {
-        return placeAtBank(orderId, tenant, customerId, variantId, location, qty, businessAt, "bank_card");
-    }
-
     /** The two bank rails share everything but the ask: the card ride holds
      *  and captures at /api/card/charge, the main account debits the EUR
      *  statement at /api/main/charge. Same journal, same derived reference,
@@ -209,20 +191,155 @@ public final class Checkout {
         if (reserved instanceof Orders.AlreadyProcessed) return new Rejected("already processed");
         if (!(reserved instanceof Orders.Ok ok)) return new Rejected("could not reserve");
 
+        Result charged = chargeAtBank(orderId, customerId, ok.amount(), mode, businessAt);
+        if (charged instanceof Rejected) {
+            try { Orders.abort(orderId, businessAt); } catch (SQLException ignored) {}
+        }
+        return charged;
+    }
+
+    /** One line of a basket: a variant and how many. */
+    public record Line(String variant, long qty) {}
+
+    /** The basket's answer: the group id, the charge reference, the total. */
+    public record CartPlaced(UUID groupId, String reference, BigDecimal amount,
+                             List<UUID> orderIds) implements Result {}
+
+    /**
+     * THE BASKET · reserve every line, charge the total once, ship nothing yet.
+     *
+     * Each line is its own order row, placed by the existing single-line
+     * machinery with an id DERIVED from the group ("group:variant" → the same
+     * line id on any retry), so a retried group checkout re-asks the same
+     * lines and the ledger's own idempotency places nothing twice. The money
+     * is one charge for the basket total on the shopper's rail, referenced
+     * from the group id for the same reason. A line that cannot reserve, or
+     * a charge that is answered no, puts every line back: nobody pays for,
+     * or holds stock for, half a basket.
+     */
+    public static Result placeCart(UUID groupId, String tenant, long customerId,
+                                   List<Line> lines, String location, Instant businessAt,
+                                   String mode) throws SQLException {
+        if (lines == null || lines.isEmpty()) return new Rejected("empty basket");
+        if (!"bank_card".equals(mode) && !"bank_main".equals(mode))
+            return placeCartOnPsp(groupId, tenant, customerId, lines, location, businessAt);
+        List<UUID> placed = new java.util.ArrayList<>();
+        BigDecimal total = BigDecimal.ZERO;
+        for (Line line : lines) {
+            UUID lineId = UUID.nameUUIDFromBytes((groupId + ":" + line.variant())
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Orders.Result reserved;
+            try {
+                reserved = Orders.submitMode(lineId, tenant, customerId, line.variant(),
+                        location, line.qty(), businessAt, mode);
+            } catch (IllegalArgumentException e) {
+                // a variant that was never stocked has no stock accounts at
+                // all — the same answer as an empty shelf, said honestly
+                reserved = new Orders.OutOfStock(line.variant());
+            }
+            if (reserved instanceof Orders.AlreadyProcessed)
+                return new Rejected("already processed");
+            if (!(reserved instanceof Orders.Ok ok)) {
+                for (UUID id : placed) try { Orders.abort(id, businessAt); } catch (SQLException ignored) {}
+                return new Rejected(reserved instanceof Orders.OutOfStock
+                        ? "out of stock: " + line.variant() : "could not reserve");
+            }
+            placed.add(lineId);
+            total = total.add(ok.amount());
+        }
+        Result charged = chargeAtBank(groupId, customerId, total, mode, businessAt);
+        if (charged instanceof Rejected rej) {
+            for (UUID id : placed) try { Orders.abort(id, businessAt); } catch (SQLException ignored) {}
+            return rej;
+        }
+        Placed p = (Placed) charged;
+        return new CartPlaced(groupId, p.paymentIntentId(), total, placed);
+    }
+
+    /** THE ANONYMOUS BASKET · many lines, one PaymentIntent at the processor,
+     *  the same discipline as the bank basket above. */
+    private static Result placeCartOnPsp(UUID groupId, String tenant, long customerId,
+                                         List<Line> lines, String location, Instant businessAt) throws SQLException {
+        List<UUID> placed = new java.util.ArrayList<>();
+        BigDecimal total = BigDecimal.ZERO;
+        for (Line line : lines) {
+            UUID lineId = UUID.nameUUIDFromBytes((groupId + ":" + line.variant())
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Orders.Result reserved;
+            try {
+                reserved = Orders.submitMode(lineId, tenant, customerId, line.variant(),
+                        location, line.qty(), businessAt, "psp");
+            } catch (IllegalArgumentException e) {
+                reserved = new Orders.OutOfStock(line.variant());
+            }
+            if (reserved instanceof Orders.AlreadyProcessed)
+                return new Rejected("already processed");
+            if (!(reserved instanceof Orders.Ok ok)) {
+                for (UUID id : placed) try { Orders.abort(id, businessAt); } catch (SQLException ignored) {}
+                return new Rejected(reserved instanceof Orders.OutOfStock
+                        ? "out of stock: " + line.variant() : "could not reserve");
+            }
+            placed.add(lineId);
+            total = total.add(ok.amount());
+        }
+        String pi = intentIdFor(groupId);
+        RemoteSteps.begin(groupId, RemoteSteps.AUTHORIZE, pi, businessAt);
+        try {
+            String body = "{\"id\":\"" + pi + "\",\"amount\":\"" + total.toPlainString() +
+                          "\",\"customer\":\"" + customerRef(customerId) + "\",\"merchant\":\"" + tenant +
+                          "\",\"business_at\":\"" + businessAt + "\"}";
+            HttpResponse<String> r = http.send(
+                    HttpRequest.newBuilder(URI.create(payBaseUrl + "/v1/payment_intents"))
+                            .timeout(Duration.ofSeconds(3))
+                            .header("Content-Type", "application/json")
+                            .header("Idempotency-Key", "order:" + groupId)
+                            .POST(HttpRequest.BodyPublishers.ofString(body)).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            if (r.statusCode() != 200) {
+                RemoteSteps.finish(groupId, RemoteSteps.AUTHORIZE, RemoteSteps.State.FAILED,
+                        "HTTP " + r.statusCode());
+                for (UUID id : placed) try { Orders.abort(id, businessAt); } catch (SQLException ignored) {}
+                return new Rejected("payment failed: HTTP " + r.statusCode());
+            }
+            RemoteSteps.finish(groupId, RemoteSteps.AUTHORIZE, RemoteSteps.State.OK, null);
+        } catch (Exception e) {
+            // a timeout is not a decline: written down, goods back, reconciler's maybe
+            boolean neverLanded = e instanceof java.net.ConnectException
+                    || e instanceof java.net.http.HttpConnectTimeoutException;
+            RemoteSteps.finish(groupId, RemoteSteps.AUTHORIZE,
+                    neverLanded ? RemoteSteps.State.FAILED : RemoteSteps.State.UNKNOWN,
+                    e.getClass().getSimpleName() + ": " + e.getMessage());
+            for (UUID id : placed) try { Orders.abort(id, businessAt); } catch (SQLException ignored) {}
+            return new Rejected("payment unreachable: " + e.getClass().getSimpleName());
+        }
+        try (Connection c = Db.open();
+             PreparedStatement ps = c.prepareStatement("UPDATE orders SET payment_intent_id = ? WHERE id = ANY(?)")) {
+            ps.setString(1, pi);
+            ps.setArray(2, c.createArrayOf("uuid", placed.toArray()));
+            ps.executeUpdate();
+        }
+        return new CartPlaced(groupId, pi, total, placed);
+    }
+
+    /** The one ask for money, shared by the single-line rails and the basket:
+     *  journal first, derive the reference from the order/group id, honour a
+     *  maybe. Returns Placed (reusing the single-line answer shape) or Rejected. */
+    private static Result chargeAtBank(UUID orderId, long customerId, BigDecimal amount,
+                                       String mode, Instant businessAt) throws SQLException {
         String ref = "mart:" + orderId;    // the bank's idempotency key, from the order
         RemoteSteps.begin(orderId, RemoteSteps.AUTHORIZE, ref, businessAt);
-        String amount = ok.amount().stripTrailingZeros().toPlainString();
+        String amt = amount.stripTrailingZeros().toPlainString();
         String path, body;
         if ("bank_main".equals(mode)) {
             path = "/api/main/charge";
             body = "{\"customer\":" + customerId
-                    + ",\"amount\":\"" + amount
+                    + ",\"amount\":\"" + amt
                     + "\",\"reference\":\"" + UUID.nameUUIDFromBytes(ref.getBytes(java.nio.charset.StandardCharsets.UTF_8))
                     + "\",\"merchant\":\"minimart\"}";
         } else {
             path = "/api/card/charge";
             body = "{\"customer\":" + customerId
-                    + ",\"amount\":\"" + amount
+                    + ",\"amount\":\"" + amt
                     + "\",\"authorization_id\":\"" + UUID.nameUUIDFromBytes(ref.getBytes(java.nio.charset.StandardCharsets.UTF_8))
                     + "\",\"merchant\":\"minimart\"}";
         }
@@ -235,13 +352,14 @@ public final class Checkout {
                     HttpResponse.BodyHandlers.ofString());
             if (r.statusCode() == 200 && r.body().contains("\"charged\":true")) {
                 RemoteSteps.finish(orderId, RemoteSteps.AUTHORIZE, RemoteSteps.State.OK, null);
-                return new Placed(orderId, ref, ok.amount());
+                return new Placed(orderId, ref, amount);
             }
-            // an ANSWER, and it was no — declined, or the bank said 4xx
+            // an ANSWER, and it was no — declined, or the bank said 4xx.
+            // The GOODS are the caller's to put back: the single-line rails
+            // and the basket both own their reservations above this seam.
             String reason = r.body().contains("\"reason\"")
                     ? r.body().replaceAll(".*\"reason\":\"([^\"]*)\".*", "$1") : "HTTP " + r.statusCode();
             RemoteSteps.finish(orderId, RemoteSteps.AUTHORIZE, RemoteSteps.State.FAILED, reason);
-            Orders.abort(orderId, businessAt);
             return new Rejected(("bank_main".equals(mode) ? "account declined: " : "card declined: ") + reason);
         } catch (Exception e) {
             // SAME RULE AS THE PSP PATH: a timeout is not a decline. The bank
@@ -252,7 +370,6 @@ public final class Checkout {
             RemoteSteps.finish(orderId, RemoteSteps.AUTHORIZE,
                     neverLanded ? RemoteSteps.State.FAILED : RemoteSteps.State.UNKNOWN,
                     e.getClass().getSimpleName() + ": " + e.getMessage());
-            try { Orders.abort(orderId, businessAt); } catch (SQLException ignored) {}
             return new Rejected("bank unreachable: " + e.getClass().getSimpleName());
         }
     }
