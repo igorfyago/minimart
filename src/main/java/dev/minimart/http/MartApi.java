@@ -83,7 +83,8 @@ public final class MartApi {
         String path = ex.getRequestURI().getPath();
         if (path == null || path.equals("/") || path.isEmpty()) path = "/index.html";
         String type = path.endsWith(".css") ? "text/css" : path.endsWith(".js") ? "application/javascript"
-                : path.endsWith(".svg") ? "image/svg+xml" : "text/html; charset=utf-8";
+                : path.endsWith(".svg") ? "image/svg+xml" : path.endsWith(".png") ? "image/png"
+                : "text/html; charset=utf-8";
         try (var in = MartApi.class.getResourceAsStream("/web" + path)) {
             if (in == null) { send(ex, 404, "{\"error\":\"not found\"}"); return; }
             byte[] b = in.readAllBytes();

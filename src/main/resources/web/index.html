@@ -83,6 +83,11 @@
      leaves one stranded on a row of its own. */
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(300px,100%),1fr)); gap:14px;
           align-items:stretch; }
+  .prod-art.has-img { padding:0; display:block; }
+  .prod-art img { width:100%; height:100%; object-fit:cover; display:block; }
+  .prod-bens { display:flex; flex-wrap:wrap; gap:5px; margin:2px 0 10px; }
+  .prod-ben { font-size:10.5px; color:var(--dim); border:1px solid var(--line);
+              border-radius:999px; padding:2px 8px; }
   .prod { position:relative; display:flex; flex-direction:column; min-width:0;
           background:var(--panel); border:1px solid var(--line); border-radius:14px; overflow:hidden;
           transition:border-color .18s, transform .18s, box-shadow .18s; }
@@ -202,6 +207,34 @@
   .co-receipt .big { font-size:42px; margin-bottom:8px; }
   .co-receipt h3 { font-size:17px; font-weight:700; margin-bottom:6px; }
   .co-receipt .muted { margin-bottom:0; }
+
+  /* ------------------------------------------------------ the storefront
+     chrome: the announcement bar, the trust strip, the footer. What makes a
+     page a STORE rather than a dashboard with prices. */
+  .announce { text-align:center; font-size:12px; color:var(--dim); letter-spacing:.03em;
+              padding:8px 12px; margin-bottom:18px; border:1px solid var(--line);
+              border-radius:999px; background:var(--panel); }
+  .trust { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px,1fr)); gap:12px;
+           margin:22px 0 4px; }
+  .trust-item { display:flex; gap:10px; align-items:flex-start; background:var(--panel);
+                border:1px solid var(--line); border-radius:10px; padding:12px 14px;
+                font-size:12.5px; }
+  .trust-item span { font-size:18px; }
+  .trust-item b { font-size:12.5px; }
+  footer { border-top:1px solid var(--line); margin-top:34px; padding:28px 22px 18px; }
+  .foot-grid { max-width:1100px; margin:0 auto; display:grid;
+               grid-template-columns:2fr 1fr 1fr 1fr; gap:22px; }
+  @media (max-width:760px) { .foot-grid { grid-template-columns:1fr 1fr; } }
+  .foot-brand { font-size:16px; font-weight:750; margin-bottom:6px; }
+  .foot-brand span { background:linear-gradient(90deg, var(--accent), var(--violet));
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .foot-head { font-size:11px; color:var(--dim); text-transform:uppercase;
+               letter-spacing:.06em; margin-bottom:8px; }
+  footer a { display:block; color:var(--dim); text-decoration:none; font-size:12.5px;
+             padding:2px 0; }
+  footer a:hover { color:var(--accent); }
+  .foot-base { max-width:1100px; margin:18px auto 0; padding-top:14px;
+               border-top:1px solid var(--line); font-size:11.5px; }
 </style>
 </head>
 <body>
@@ -232,10 +265,11 @@
 <main>
   <!-- ================= SHOP ================= -->
   <section id="shop">
+    <div class="announce">Free shipping on every order · 30-day empty-jar guarantee · ships from Madrid in 24h</div>
     <div class="shop-head">
       <div>
         <div class="shop-title">helix <span>supply</span></div>
-        <div class="muted">Subscriptions and one-off orders, settled on a real ledger.</div>
+        <div class="muted">Supplement stacks for deep work, training and sleep. Subscriptions and one-offs.</div>
       </div>
       <div class="shop-meta">
         <span class="pill" id="shopper">you are customer</span>
@@ -248,20 +282,18 @@
       <div class="prod"><div class="prod-art"></div><div class="prod-body"><div class="muted">loading the catalogue</div></div></div>
     </div>
 
+    <div class="trust">
+      <div class="trust-item"><span>🚚</span><div><b>Free shipping</b><div class="muted">Every order, tracked, 24h dispatch</div></div></div>
+      <div class="trust-item"><span>↩️</span><div><b>30-day guarantee</b><div class="muted">Empty jar? Full refund, no questions</div></div></div>
+      <div class="trust-item"><span>🔒</span><div><b>Your money at your bank</b><div class="muted">Pay from your account or card — the shop never holds it</div></div></div>
+      <div class="trust-item"><span>🧪</span><div><b>Third-party tested</b><div class="muted">Every batch, published results</div></div></div>
+    </div>
+
     <div class="card" style="margin-top:16px">
       <h2>Your orders</h2>
       <div class="sub">What happened after you paid · the parcel's journey, answered live by the
         logistics service, and the money's journey when a parcel could not go.</div>
       <div id="myorders"><div class="muted">nothing yet · buy something above</div></div>
-    </div>
-
-    <div class="card" style="margin-top:16px">
-      <h2>What a purchase actually does</h2>
-      <div class="sub">Reserves stock in one database and authorises money in another, over HTTP, then
-        captures on shipment. No money you own is ever involved.</div>
-      <div class="note">Stock is a second double-entry ledger. A stock account's currency is
-        <code>UNIT:{product}</code>, so "you cannot oversell" and "you cannot overdraw" are the same rule,
-        checked once under a row lock. Overselling is not defended against here, it is impossible to express.</div>
     </div>
   </section>
 
@@ -300,6 +332,14 @@
 
   <!-- ================= OPERATIONS ================= -->
   <section id="ops" class="hidden">
+    <div class="card">
+      <h2>What a purchase actually does</h2>
+      <div class="sub">Reserves stock in one database and authorises money in another, over HTTP, then
+        captures on shipment. No money you own is ever involved.</div>
+      <div class="note">Stock is a second double-entry ledger. A stock account's currency is
+        <code>UNIT:{product}</code>, so "you cannot oversell" and "you cannot overdraw" are the same rule,
+        checked once under a row lock. Overselling is not defended against here, it is impossible to express.</div>
+    </div>
     <div class="card">
       <h2>Live operations</h2>
       <div class="sub">Read straight from the running system, every 3 seconds.</div>
@@ -392,6 +432,34 @@
     </div>
   </section>
 </main>
+
+<footer>
+  <div class="foot-grid">
+    <div>
+      <div class="foot-brand">helix <span>supply</span></div>
+      <div class="muted">Supplement stacks, settled on a real ledger. Part of the b4rruf3t estate.</div>
+    </div>
+    <div>
+      <div class="foot-head">Shop</div>
+      <a href="#shop">Catalogue</a>
+      <a href="#rev">Revenue</a>
+      <a href="https://pay.b4rruf3t.com">minipay</a>
+    </div>
+    <div>
+      <div class="foot-head">Help</div>
+      <a href="#shop">Shipping &amp; returns</a>
+      <a href="#shop">30-day guarantee</a>
+      <a href="mailto:support@b4rruf3t.com">support@b4rruf3t.com</a>
+    </div>
+    <div>
+      <div class="foot-head">Estate</div>
+      <a href="https://bank.b4rruf3t.com">minibank</a>
+      <a href="https://desk.b4rruf3t.com">the desk</a>
+      <a href="https://github.com/igorfyago/minimart" target="_blank">Source</a>
+    </div>
+  </div>
+  <div class="foot-base muted">© 2026 helix supply · every order on a double-entry ledger, every parcel tracked</div>
+</footer>
 
 <div class="toast" id="toast"></div>
 
@@ -517,8 +585,15 @@ function toast(msg) {
   setTimeout(() => t.classList.remove('show'), 2600);
 }
 
-// A stable colour per product, derived from its id, so the shelf looks like a
-// shelf rather than a list and a product keeps its identity between loads.
+// The shelf's photography: one studio shot per product family, shipped with
+// the shop. An unknown product keeps the old derived-gradient treatment, so a
+// new catalogue entry needs no code to look like it belongs.
+const PRODUCT_IMG = {focus: '/focus.png', recovery: '/recovery.png',
+                     sleep: '/sleep.png', starter: '/starter.png'};
+const imgFor = (id, title) => {
+  const key = Object.keys(PRODUCT_IMG).find(k => new RegExp(k, 'i').test(id + ' ' + title));
+  return key ? PRODUCT_IMG[key] : null;
+};
 function artFor(id, title) {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
@@ -536,21 +611,25 @@ async function loadProducts() {
   if (!items.length) { el.innerHTML = '<div class="muted">the catalogue is empty</div>'; return; }
   el.innerHTML = items.map(p => {
     const art = artFor(p.id, p.title);
-    const d = describe(p.title);
+    const d = describe(p.title, p.price);
     const chip = p.onHand <= 0 ? ['none', 'sold out']
                : p.onHand < 20 ? ['low', p.onHand + ' left']
                : ['', 'in stock'];
+    const img = imgFor(p.id, p.title);
+    const benefits = d.benefits.map(b => `<span class="prod-ben">${b}</span>`).join('');
     return `
     <div class="prod">
-      <div class="prod-art" style="background:${art.bg}">${art.glyph}
+      <div class="prod-art ${img ? 'has-img' : ''}" style="${img ? '' : 'background:' + art.bg}">
+        ${img ? `<img src="${img}" alt="${d.name}" loading="lazy">` : art.glyph}
         <span class="stock-chip ${chip[0]}">${chip[1]}</span>
       </div>
       <div class="prod-body">
         <div class="prod-name">${d.name}</div>
         <div class="prod-blurb">${d.blurb}</div>
+        <div class="prod-bens">${benefits}</div>
         <div class="prod-foot">
           <span class="prod-val">${money(p.price)}</span>
-          <span class="prod-per">${d.per}</span>
+          <span class="prod-per">${d.per} · ${d.perDay}/day</span>
         </div>
         <button class="buy" data-v="${p.id}" ${p.onHand <= 0 ? 'disabled' : ''}>
           ${p.onHand <= 0 ? 'Sold out' : 'Add to cart'}</button>
@@ -559,29 +638,36 @@ async function loadProducts() {
   }).join('');
   document.querySelectorAll('button.buy[data-v]').forEach(b => b.onclick = () => {
     const p = items.find(x => x.id === b.dataset.v);
-    addToCart({id: p.id, title: describe(p.title).name, price: p.price});
+    addToCart({id: p.id, title: describe(p.title, p.price).name, price: p.price});
     syncCartBadge();
     b.textContent = 'In cart ✓';
     setTimeout(() => { b.textContent = 'Add to cart'; }, 900);
   });
-  $('#shopper').textContent = 'customer ' + CUSTOMER;
+  if (!IDENTIFIED) $('#shopper').textContent = 'Guest · minipay checkout';
 }
 
 // Split "Recovery Stack · 30 day" into a name and the term, and give each line
 // a short description. Derived from the catalogue rather than invented per
 // product, so a new product needs no code.
-function describe(title) {
+function describe(title, price) {
   const parts = title.split('\u00b7').map(s => s.trim());
   const name = parts[0];
   const per = parts[1] ? parts[1] + ' supply' : 'one off';
-  const blurbs = {
-    focus: 'For the hours that need to count. Ships monthly, cancel whenever.',
-    sleep: 'Wind down properly. A month at a time, no commitment.',
-    recovery: 'For training weeks that ask a lot. Renews every 30 days.',
-    starter: 'A short trial, to see whether any of this suits you.',
+  const days = parts[1] ? parseInt(parts[1]) || 30 : 0;
+  const perDay = days && price ? '€' + (Number(price) / days).toFixed(2) : null;
+  const info = {
+    focus: {blurb: 'For the hours that need to count. Ships monthly, cancel whenever.',
+            benefits: ['Citicoline 250mg', 'L-theanine', 'No jitters']},
+    sleep: {blurb: 'Wind down properly. A month at a time, no commitment.',
+            benefits: ['Magnesium glycinate', 'Apigenin', 'No grogginess']},
+    recovery: {blurb: 'For training weeks that ask a lot. Renews every 30 days.',
+               benefits: ['Creatine 5g', 'Omega-3', 'Tart cherry']},
+    starter: {blurb: 'A short trial, to see whether any of this suits you.',
+              benefits: ['14-day supply', 'Full-dose formula', 'Cancel anytime']},
   };
-  const key = Object.keys(blurbs).find(k => new RegExp(k, 'i').test(title));
-  return {name, per, blurb: key ? blurbs[key] : 'A single item, shipped once.'};
+  const key = Object.keys(info).find(k => new RegExp(k, 'i').test(title));
+  const d = key ? info[key] : {blurb: 'A single item, shipped once.', benefits: []};
+  return {name, per, blurb: d.blurb, benefits: d.benefits, perDay: perDay || 'one off'};
 }
 
 // ---- cart & checkout: the panel, the flow, the receipt ----
