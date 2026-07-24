@@ -849,6 +849,8 @@ async function payNow() {
     for (const id of r.orders || [])
       await fetch('/api/orders/' + id + '/ship', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
     // the receipt: what was bought, what it cost, where the money went
+    // (cart still in scope here — name what was bought, then clear it)
+    const bought = cartLines().map(l => (l.title || l.variant) + (l.qty > 1 ? ' ×' + l.qty : '')).join(' · ');
     const rail = IDENTIFIED ? (PAY === 'main' ? 'Main account · see Transactions at the bank'
                                              : 'Credit card · see Card at the bank')
                             : 'minipay';
@@ -858,7 +860,8 @@ async function payNow() {
     const eta = new Date(Date.now() + 3 * 864e5);
     const etaTxt = eta.toLocaleDateString(undefined, {weekday: 'long', day: 'numeric', month: 'long'});
     const steps = ['Order placed', 'Label printed', 'On its way', 'Delivered'];
-    co('#co-receipt').innerHTML = `<div class="big">✅</div>
+    const CHECK_SVG = '<svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true"><circle cx="22" cy="22" r="20" fill="none" stroke="var(--green)" stroke-width="2.5"/><path d="M14 22.5l5.5 5.5L30.5 17" fill="none" stroke="var(--green)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    co('#co-receipt').innerHTML = `<div class="big">${CHECK_SVG}</div>
       <h3>${money(r.amount)} · paid via ${rail}</h3>
       <div class="muted">order <span class="mono">#${String(r.orderId).slice(0, 8)}</span> · ${cartCount()} item(s)</div>
       <div class="rc-eta">arriving by <b>${etaTxt}</b> · free tracked shipping from Madrid</div>
@@ -867,7 +870,7 @@ async function payNow() {
       <div class="muted" style="margin-top:10px">watch it move under Your orders below</div>`;
     ecoTick(IDENTIFIED && PAY === 'card' ? '💳' : IDENTIFIED ? '🏦' : '🧾',
             'minimart · ' + (IDENTIFIED ? (PAY === 'main' ? 'account charged' : 'card captured') : 'payment captured')
-            + ' · ' + cartCount() + ' item(s)',
+            + ' · ' + bought,
             '−' + money(r.amount), 'neg');
     CART = {}; syncCartBadge();
     loadProducts(); loadMyOrders();
