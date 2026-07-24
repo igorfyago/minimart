@@ -172,23 +172,30 @@
   .prov.MEASURED { border-color:#3fb95055; color:var(--green); }
 
   /* ------------------------------------------------------ the shop's marquee
-     A REAL sliding ticker, docked under the header, always on. Fed by every
-     ecoTick on the page (checkout, restock, the tape walker) plus the pulse;
-     slides continuously, loops the last moments forever. This is the markee
-     the shop itself owns — the estate toast at the bottom stays its own. */
-  #ticker-bar { position:sticky; top:64px; z-index:19; overflow:hidden; height:30px;
-                background:rgba(7,12,16,.97); border-bottom:1px solid #143024;
-                backdrop-filter:blur(8px); font:11.5px 'Cascadia Code',Consolas,monospace; }
-  #ticker-bar .tk-track { display:flex; align-items:center; gap:38px; height:100%;
-                          white-space:nowrap; width:max-content; padding-left:100%;
-                          animation:ticker-slide 30s linear infinite; }
-  #ticker-bar:hover .tk-track { animation-play-state:paused; }
-  @keyframes ticker-slide { to { transform:translateX(-100%); } }
-  #ticker-bar .tk-item { display:inline-flex; align-items:center; gap:7px; color:#5da878; }
-  #ticker-bar .tk-item .tk-a { font-weight:750; }
-  #ticker-bar .tk-item .tk-a.pos { color:#31e981; text-shadow:0 0 11px rgba(49,233,129,.5); }
-  #ticker-bar .tk-item .tk-a.neg { color:#ff5d6c; text-shadow:0 0 11px rgba(255,93,108,.4); }
-  #ticker-bar .tk-item .tk-a.amb { color:#d29922; }
+     THE BANK'S TAPE, VERBATIM GEOMETRY · fixed to the bottom of the viewport,
+     masked belt, trains that slide in from the right and retire off the left.
+     Fed by every ecoTick on the page (checkout, restock, the tape walker);
+     quiet shop = empty tape, exactly like the bank. Since #ticker-bar exists
+     here, the estate bar's own toast bows out — one markee per screen. */
+  #ticker-bar { position:fixed; left:0; right:0; bottom:0; height:34px; z-index:45; overflow:hidden;
+    background:rgba(7,12,16,.96); border-top:1px solid #143024; backdrop-filter:blur(8px);
+    display:flex; align-items:center; font:11.5px 'Cascadia Code', Consolas, monospace;
+    transform:translateY(110%); transition:transform .45s ease; }
+  #ticker-bar.on { transform:none; }
+  #tk-belt { position:relative; flex:1; height:100%; overflow:hidden;
+    -webkit-mask:linear-gradient(90deg, transparent, #000 26px, #000 calc(100% - 26px), transparent);
+    mask:linear-gradient(90deg, transparent, #000 26px, #000 calc(100% - 26px), transparent); }
+  #tk-track { position:absolute; left:0; top:0; height:100%; white-space:nowrap;
+    will-change:transform; contain:layout style; }
+  .tape-train { position:absolute; top:0; height:100%; display:inline-flex; align-items:center;
+    gap:8px; animation:tapeflash 1.6s ease-out; }
+  @keyframes tapeflash { from { filter:brightness(2.3) saturate(1.7); } }
+  .tp-h { font-size:13px; }
+  .tp-s { color:#5da878; }
+  .tp-pos { color:#31e981; font-weight:750; text-shadow:0 0 11px rgba(49,233,129,.5); }
+  .tp-neg { color:#ff5d6c; font-weight:750; text-shadow:0 0 11px rgba(255,93,108,.4); }
+  .tp-amb { color:var(--amber); font-weight:700; text-shadow:0 0 10px rgba(245,180,60,.35); }
+  main { padding-bottom:46px; }
 
   /* ------------------------------------------------------ cart & checkout
      The panel floats over the shop; everything inside is one column, one
@@ -302,10 +309,10 @@
   </nav>
 </header>
 
-<!-- THE SHOP'S MARQUEE · always sliding, fed by ecoTick below. The estate
-     bar's toast yields the floor to this (it bows out when #ticker-bar
-     exists); one markee per screen, and the shop's own wins. -->
-<div id="ticker-bar" aria-hidden="true"><div class="tk-track" id="ticker-track"></div></div>
+<!-- THE SHOP'S MARQUEE · the bank's tape, verbatim: fixed at the bottom of
+     the viewport, trains slide right to left. The estate bar's toast yields
+     the floor to this (it bows out when #ticker-bar exists). -->
+<div id="ticker-bar"><div id="tk-belt"><div id="tk-track"></div></div></div>
 
 <main>
   <!-- ================= SHOP ================= -->
@@ -1080,32 +1087,51 @@ setTimeout(ecoPulseTick, 800);
 
 // THE ESTATE TAPE, FED BY THE SHOP · the shop puts its money moments on the
 // wire in the shop's own words. Every ecoTick lands in TWO places: the estate
-// bar's bottom toast (eco-nav.js), and the shop's own sliding marquee under
-// the header (#ticker-bar), which never goes silent.
+// bar's bottom toast (eco-nav.js), and the shop's own tape — the bank's
+// markee verbatim: trains that cross the bottom of the screen once, in order.
 const ecoTick = (icon, text, amount, tone) => {
   document.dispatchEvent(new CustomEvent('eco:tick', {detail: {icon, text, amount, tone}}));
-  tickerPush(icon, text, amount, tone);
+  tapeTrain(icon, text, amount, tone);
 };
 
-// THE MARQUEE · a ring of the last moments, duplicated so the slide loops
-// seamlessly. Speed scales with content so a busy shop doesn't race.
-const TICKER_MAX = 12;
-let tickerItems = [];
-function tickerRender() {
-  const track = document.getElementById('ticker-track');
-  if (!track) return;
-  const htmlOf = it => `<span class="tk-item"><span>${it.icon}</span><span>${it.text}</span>`
-    + (it.amount ? `<span class="tk-a ${it.tone || 'amb'}">${it.amount}</span>` : '') + '</span>';
-  const one = tickerItems.map(htmlOf).join('<span class="tk-item" style="color:#143024">·</span>');
-  track.innerHTML = one + '<span class="tk-item" style="color:#143024">·</span>' + one;
-  const half = track.scrollWidth / 2;
-  track.style.animationDuration = Math.max(14, half / 60) + 's';
+// THE MARQUEE · the bank's train-tape geometry kept in JS, never read back
+// from the DOM: each train is measured once at birth, placed behind the last
+// one, and the frame loop is arithmetic plus one transform write. Trains
+// retire off the left edge and are gone — a quiet shop shows an empty tape.
+const tapeTrack = document.getElementById('tk-track');
+const tapeBelt = document.getElementById('tk-belt');
+const tapeBar = document.getElementById('ticker-bar');
+const TAPE = { trains: [], next: 0, speed: 0.104, gap: 76, last: 0 };
+const tapeEsc = s => String(s == null ? '' : s).replace(/</g, '&lt;');
+function tapeTrain(icon, text, amount, tone) {
+  if (!tapeTrack) return;
+  const el = document.createElement('div');
+  el.className = 'tape-train';
+  el.innerHTML = `<span class="tp-h">${icon}</span><span class="tp-s">${tapeEsc(text)}</span>`
+    + (amount ? `<span class="tp-${tone === 'pos' || tone === 'neg' ? tone : 'amb'}">${tapeEsc(amount)}</span>` : '');
+  tapeTrack.appendChild(el);
+  const w = el.offsetWidth;
+  el.style.left = Math.max(TAPE.next, tapeBelt.clientWidth) + 'px';
+  TAPE.next = Math.max(TAPE.next, tapeBelt.clientWidth) + w + TAPE.gap;
+  TAPE.trains.push({ el, w });
+  tapeBar.classList.add('on');
 }
-function tickerPush(icon, text, amount, tone) {
-  tickerItems.push({icon, text, amount, tone});
-  if (tickerItems.length > TICKER_MAX) tickerItems = tickerItems.slice(-TICKER_MAX);
-  tickerRender();
+function tapeFrame(now) {
+  const dt = Math.min(now - (TAPE.last || now), 120);
+  TAPE.last = now;
+  const dx = TAPE.speed * dt;
+  TAPE.next -= dx;
+  let retire = 0;
+  for (const t of TAPE.trains) {
+    const x = parseFloat(t.el.style.left) - dx;
+    t.el.style.left = x + 'px';
+    if (x + t.w < 0) { t.el.remove(); retire++; }
+  }
+  if (retire) TAPE.trains.splice(0, retire);
+  if (!TAPE.trains.length) { TAPE.next = 0; tapeBar.classList.remove('on'); }
+  requestAnimationFrame(tapeFrame);
 }
+requestAnimationFrame(tapeFrame);
 
 const PARCEL_STEPS = ['requested', 'labelled', 'in_transit', 'delivered'];
 const PARCEL_WORDS = {requested: 'preparing', labelled: 'label printed', in_transit: 'on its way', delivered: 'delivered'};
@@ -1248,11 +1274,11 @@ loadMyOrders();
 loadOps();
 setInterval(loadOps, 3000);
 
-// The marquee opens with the shop's own vital signs, then every real moment
-// pushes on. A guest on a quiet shop still watches the tape slide.
-tickerPush('🧬', 'helix supply · settled on a real ledger · free tracked shipping from Madrid', null, 'amb');
+// The tape opens with the shop's own vital signs, then every real moment
+// crosses. A guest on a quiet shop still sees the markee slide.
+tapeTrain('🧬', 'helix supply · settled on a real ledger · free tracked shipping from Madrid', null, 'amb');
 fetch('/api/pulse').then(r => r.json()).then(p =>
-  tickerPush('📦', p.orders + ' orders · ' + p.invoices + ' invoices · ' + p.stockMoves + ' stock moves on the books', null, 'amb')
+  tapeTrain('📦', p.orders + ' orders · ' + p.invoices + ' invoices · ' + p.stockMoves + ' stock moves on the books', null, 'amb')
 ).catch(() => {});
 // the parcel view keeps itself honest: freight moves parcels whether or not
 // this tab is watching, so the card re-asks politely rather than on click
