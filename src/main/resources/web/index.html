@@ -57,6 +57,16 @@
   .mini { background:none; border:1px solid var(--line); color:var(--text); padding:3px 10px;
           border-radius:7px; font:600 11px system-ui; cursor:pointer; }
   .mini:hover { border-color:var(--violet); color:var(--violet); }
+
+  /* THE ECOSYSTEM RAIL · the same living strip the bank shows under a
+     transfer: each technology that carried your money, with its heartbeat. */
+  .eco-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+  .eco { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .eco-head { font:600 12px system-ui; margin-bottom:6px; }
+  .eco-body { font-size:12px; color:var(--dim); line-height:1.7; }
+  .eco-body b { color:var(--text); }
+  .spark { width:100%; height:16px; margin-top:8px; }
+  .eco-sub { font-size:11px; color:var(--dim); margin-top:4px; }
   input, select { background:var(--bg); border:1px solid var(--line); color:var(--text); padding:9px 10px;
                   border-radius:8px; font:14px system-ui; }
   input[type=number] { width:92px; }
@@ -305,6 +315,31 @@
       <div class="sub">What happened after you paid · the parcel's journey, answered live by the
         logistics service, and the money's journey when a parcel could not go.</div>
       <div id="myorders"><div class="muted">nothing yet · buy something above</div></div>
+    </div>
+
+    <div class="card">
+      <h2>The ecosystem, live</h2>
+      <div class="sub">Every purchase above travels these rails · read from the running system,
+        every 3 seconds, like the bank's strip under a transfer.</div>
+      <div class="eco-grid">
+        <div class="eco">
+          <div class="eco-head">🐘 PostgreSQL</div>
+          <div class="eco-body" id="eco-pg-body">…</div>
+          <svg class="spark" id="spark-pg" viewBox="0 0 60 16" preserveAspectRatio="none"></svg>
+          <div class="eco-sub">ledger rows, last minute</div>
+        </div>
+        <div class="eco">
+          <div class="eco-head">📨 Kafka</div>
+          <div class="eco-body" id="eco-kafka-body">…</div>
+          <svg class="spark" id="spark-kafka" viewBox="0 0 60 16" preserveAspectRatio="none"></svg>
+          <div class="eco-sub">events published, last minute</div>
+        </div>
+        <div class="eco">
+          <div class="eco-head">🧾 The shop's books</div>
+          <div class="eco-body" id="eco-books-body">…</div>
+          <div class="eco-sub">orders · subscriptions · invoices</div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -975,6 +1010,44 @@ async function tapeFeedTick() {
 }
 setInterval(tapeFeedTick, 5000);
 setTimeout(tapeFeedTick, 1500);
+
+/* ---- the ecosystem rail: the same living strip the bank shows under a
+   transfer. Each technology that carried the money, with a pulse line drawn
+   from the deltas between polls, exactly like the bank's own rail. ---- */
+const ecoS = { pg: [], kafka: [] };
+let ecoPrev = null;
+function ecoSpark(el, data) {
+  if (!data.length) { el.innerHTML = ''; return; }
+  const max = Math.max(...data, 1), n = data.length;
+  const pts = data.map((v, i) => `${(i / Math.max(n - 1, 1)) * 60},${15 - (v / max) * 13}`).join(' ');
+  el.innerHTML = `<polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="1.5" opacity=".9"/>`;
+}
+async function ecoPulseTick() {
+  let p;
+  try { p = await fetch('/api/pulse').then(r => r.json()); }
+  catch (e) { return; }
+  const pgEl = document.getElementById('eco-pg-body');
+  if (!pgEl) return;
+  pgEl.innerHTML =
+    `ledger rows <b>${p.stockMoves}</b><br>` +
+    `orders committed <b>${p.orders}</b>`;
+  document.getElementById('eco-kafka-body').innerHTML =
+    `published <b>${p.outboxPublished}</b> · pending <b>${p.outboxPending}</b><br>` +
+    `shipped by the outbox relay`;
+  document.getElementById('eco-books-body').innerHTML =
+    `orders <b>${p.orders}</b> · subscriptions <b>${p.subscriptions}</b><br>` +
+    `invoices <b>${p.invoices}</b>`;
+  if (ecoPrev) {
+    ecoS.pg.push(Math.max(0, p.stockMoves - ecoPrev.moves));
+    ecoS.kafka.push(Math.max(0, p.outboxPublished - ecoPrev.pub));
+    Object.values(ecoS).forEach(a => { if (a.length > 30) a.shift(); });
+    ecoSpark(document.getElementById('spark-pg'), ecoS.pg);
+    ecoSpark(document.getElementById('spark-kafka'), ecoS.kafka);
+  }
+  ecoPrev = { moves: p.stockMoves, pub: p.outboxPublished };
+}
+setInterval(ecoPulseTick, 3000);
+setTimeout(ecoPulseTick, 800);
 
 // ---- your orders: the order from our books, the parcel from freight's ----
 

@@ -67,6 +67,7 @@ public final class MartApi {
         s.createContext("/api/audit", MartApi::audit);
         s.createContext("/api/reconcile", MartApi::reconcile);
         s.createContext("/api/stats", MartApi::stats);
+        s.createContext("/api/pulse", MartApi::pulse);
         s.createContext("/api/my/orders", MartApi::myOrders);
         s.createContext("/api/orders/recent", MartApi::recentOrders);
         s.createContext("/api/stock/levels", MartApi::stockLevels);
@@ -94,6 +95,27 @@ public final class MartApi {
             ex.getResponseBody().write(b);
             ex.close();
         }
+    }
+
+    /**
+     * THE SHOP'S PULSE · the same living numbers the bank's ecosystem rail
+     * shows: what the databases have committed and what the relay has shipped
+     * to Kafka. Read from the running system, never from a cache, so the
+     * marquee under the shop is the shop's own heartbeat and not a picture
+     * of one.
+     */
+    private static void pulse(HttpExchange ex) throws IOException {
+        try (Connection c = Db.open()) {
+            long published = one(c, "SELECT COUNT(*) FROM outbox WHERE published_at IS NOT NULL");
+            long pending = one(c, "SELECT COUNT(*) FROM outbox WHERE published_at IS NULL");
+            long orders = one(c, "SELECT COUNT(*) FROM orders");
+            long subscriptions = one(c, "SELECT COUNT(*) FROM subscriptions");
+            long invoices = one(c, "SELECT COUNT(*) FROM invoices");
+            long stockMoves = one(c, "SELECT COUNT(*) FROM entries");
+            send(ex, 200, "{\"outboxPublished\":" + published + ",\"outboxPending\":" + pending +
+                    ",\"orders\":" + orders + ",\"subscriptions\":" + subscriptions +
+                    ",\"invoices\":" + invoices + ",\"stockMoves\":" + stockMoves + "}");
+        } catch (Exception e) { send(ex, 500, err(e)); }
     }
 
     /** Headline numbers for the operations view. */
