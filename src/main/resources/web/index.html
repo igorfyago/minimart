@@ -961,10 +961,10 @@ async function tapeFeedTick() {
   const fresh = evs.filter(e => !tapeFeedSeen.has(e.type + (e.orderId || '') + e.at));
   fresh.forEach(e => tapeFeedSeen.add(e.type + (e.orderId || '') + e.at));
   if (tapeFeedSeen.size > 2000) tapeFeedSeen = new Set([...tapeFeedSeen].slice(-1000));
-  // On arrival the RECENT PAST is still news: a shop that sold something
-  // this morning is a live shop, and a guest who never sees the tape move
-  // concludes there is no tape. Three hours covers a quiet spell; older is history.
-  const cutoff = Date.now() - (tapeFeedFirst ? 3 * 3600 * 1000 : 0);
+  // On arrival TODAY'S moments are still news: a shop that sold something
+  // today is a live shop, and a guest who never sees the tape move concludes
+  // there is no tape. Twelve hours covers a quiet day; older is history.
+  const cutoff = Date.now() - (tapeFeedFirst ? 12 * 3600 * 1000 : 0);
   tapeFeedFirst = false;
   fresh.sort((a, b) => new Date(a.at) - new Date(b.at))
     .filter(e => new Date(e.at).getTime() >= cutoff)

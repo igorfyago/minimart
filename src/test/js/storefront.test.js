@@ -43,7 +43,7 @@ test('the guest gets the tape too: arrival replays the last few minutes, not sil
   assert.ok(html.includes('tapeFeedFirst'), 'the walker tracks arrival');
   const tick = html.slice(html.indexOf('async function tapeFeedTick'),
                           html.indexOf('async function tapeFeedTick') + 1400);
-  assert.ok(tick.includes('3 * 3600 * 1000'), 'recent history still counts as news on arrival');
+  assert.ok(tick.includes('12 * 3600 * 1000'), 'recent history still counts as news on arrival');
   assert.ok(!tick.includes('if (tapeFeedFirst) { tapeFeedFirst = false; return; }'),
     'the first poll no longer swallows everything — a guest on a quiet shop still sees the tape');
 });
