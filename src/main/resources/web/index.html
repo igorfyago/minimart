@@ -171,6 +171,25 @@
           border:1px solid var(--line); color:var(--dim); }
   .prov.MEASURED { border-color:#3fb95055; color:var(--green); }
 
+  /* ------------------------------------------------------ the shop's marquee
+     A REAL sliding ticker, docked under the header, always on. Fed by every
+     ecoTick on the page (checkout, restock, the tape walker) plus the pulse;
+     slides continuously, loops the last moments forever. This is the markee
+     the shop itself owns — the estate toast at the bottom stays its own. */
+  #ticker-bar { position:sticky; top:64px; z-index:19; overflow:hidden; height:30px;
+                background:rgba(7,12,16,.97); border-bottom:1px solid #143024;
+                backdrop-filter:blur(8px); font:11.5px 'Cascadia Code',Consolas,monospace; }
+  #ticker-bar .tk-track { display:flex; align-items:center; gap:38px; height:100%;
+                          white-space:nowrap; width:max-content; padding-left:100%;
+                          animation:ticker-slide 30s linear infinite; }
+  #ticker-bar:hover .tk-track { animation-play-state:paused; }
+  @keyframes ticker-slide { to { transform:translateX(-100%); } }
+  #ticker-bar .tk-item { display:inline-flex; align-items:center; gap:7px; color:#5da878; }
+  #ticker-bar .tk-item .tk-a { font-weight:750; }
+  #ticker-bar .tk-item .tk-a.pos { color:#31e981; text-shadow:0 0 11px rgba(49,233,129,.5); }
+  #ticker-bar .tk-item .tk-a.neg { color:#ff5d6c; text-shadow:0 0 11px rgba(255,93,108,.4); }
+  #ticker-bar .tk-item .tk-a.amb { color:#d29922; }
+
   /* ------------------------------------------------------ cart & checkout
      The panel floats over the shop; everything inside is one column, one
      decision per screen: review, choose the rail, pay, receipt. */
@@ -282,6 +301,11 @@
     <a class="tab" href="https://github.com/igorfyago/minimart" target="_blank">GitHub</a>
   </nav>
 </header>
+
+<!-- THE SHOP'S MARQUEE · always sliding, fed by ecoTick below. The estate
+     bar's toast yields the floor to this (it bows out when #ticker-bar
+     exists); one markee per screen, and the shop's own wins. -->
+<div id="ticker-bar" aria-hidden="true"><div class="tk-track" id="ticker-track"></div></div>
 
 <main>
   <!-- ================= SHOP ================= -->
@@ -1054,11 +1078,34 @@ setTimeout(ecoPulseTick, 800);
 
 // ---- your orders: the order from our books, the parcel from freight's ----
 
-// THE ESTATE TAPE, FED BY THE SHOP · the bar at the top owns the markee at
-// the bottom (eco-nav.js); the shop puts its money moments on it in the
-// shop's own words. A page that never dispatches eco:tick simply stays silent.
-const ecoTick = (icon, text, amount, tone) =>
+// THE ESTATE TAPE, FED BY THE SHOP · the shop puts its money moments on the
+// wire in the shop's own words. Every ecoTick lands in TWO places: the estate
+// bar's bottom toast (eco-nav.js), and the shop's own sliding marquee under
+// the header (#ticker-bar), which never goes silent.
+const ecoTick = (icon, text, amount, tone) => {
   document.dispatchEvent(new CustomEvent('eco:tick', {detail: {icon, text, amount, tone}}));
+  tickerPush(icon, text, amount, tone);
+};
+
+// THE MARQUEE · a ring of the last moments, duplicated so the slide loops
+// seamlessly. Speed scales with content so a busy shop doesn't race.
+const TICKER_MAX = 12;
+let tickerItems = [];
+function tickerRender() {
+  const track = document.getElementById('ticker-track');
+  if (!track) return;
+  const htmlOf = it => `<span class="tk-item"><span>${it.icon}</span><span>${it.text}</span>`
+    + (it.amount ? `<span class="tk-a ${it.tone || 'amb'}">${it.amount}</span>` : '') + '</span>';
+  const one = tickerItems.map(htmlOf).join('<span class="tk-item" style="color:#143024">·</span>');
+  track.innerHTML = one + '<span class="tk-item" style="color:#143024">·</span>' + one;
+  const half = track.scrollWidth / 2;
+  track.style.animationDuration = Math.max(14, half / 60) + 's';
+}
+function tickerPush(icon, text, amount, tone) {
+  tickerItems.push({icon, text, amount, tone});
+  if (tickerItems.length > TICKER_MAX) tickerItems = tickerItems.slice(-TICKER_MAX);
+  tickerRender();
+}
 
 const PARCEL_STEPS = ['requested', 'labelled', 'in_transit', 'delivered'];
 const PARCEL_WORDS = {requested: 'preparing', labelled: 'label printed', in_transit: 'on its way', delivered: 'delivered'};
@@ -1200,6 +1247,13 @@ loadProducts();
 loadMyOrders();
 loadOps();
 setInterval(loadOps, 3000);
+
+// The marquee opens with the shop's own vital signs, then every real moment
+// pushes on. A guest on a quiet shop still watches the tape slide.
+tickerPush('🧬', 'helix supply · settled on a real ledger · free tracked shipping from Madrid', null, 'amb');
+fetch('/api/pulse').then(r => r.json()).then(p =>
+  tickerPush('📦', p.orders + ' orders · ' + p.invoices + ' invoices · ' + p.stockMoves + ' stock moves on the books', null, 'amb')
+).catch(() => {});
 // the parcel view keeps itself honest: freight moves parcels whether or not
 // this tab is watching, so the card re-asks politely rather than on click
 setInterval(() => { if (!$('#shop').classList.contains('hidden')) loadMyOrders(); }, 4000);
