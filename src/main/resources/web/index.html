@@ -205,9 +205,9 @@
               border-radius:999px; font:600 13px system-ui; cursor:pointer; }
   .cart-count { display:inline-block; min-width:18px; text-align:center; background:#ffffff2e;
                 border-radius:999px; padding:0 5px; margin-left:4px; font-size:11px; }
-  #cart-overlay { position:fixed; inset:0; background:rgba(4,8,14,.66); backdrop-filter:blur(3px);
-                  z-index:50; display:flex; align-items:flex-start; justify-content:flex-end; }
-  #cart-overlay.hidden { display:none; }
+  #cart-overlay, #pd-overlay { position:fixed; inset:0; background:rgba(4,8,14,.66); backdrop-filter:blur(3px);
+                   z-index:50; display:flex; align-items:flex-start; justify-content:flex-end; }
+  #cart-overlay.hidden, #pd-overlay.hidden { display:none; }
   .co-panel { width:min(440px, 100vw); height:100%; overflow-y:auto; background:var(--bg);
               border-left:1px solid var(--line); padding:22px; animation:co-in .18s ease-out; }
   @keyframes co-in { from { transform:translateX(24px); opacity:.4; } to { transform:none; opacity:1; } }
