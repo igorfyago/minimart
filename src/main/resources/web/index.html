@@ -192,6 +192,7 @@
   @keyframes tapeflash { from { filter:brightness(2.3) saturate(1.7); } }
   .tp-h { font-size:13px; }
   .tp-s { color:#5da878; }
+  .tp-a { color:#2e7a4c; font-weight:700; }
   .tp-pos { color:#31e981; font-weight:750; text-shadow:0 0 11px rgba(49,233,129,.5); }
   .tp-neg { color:#ff5d6c; font-weight:750; text-shadow:0 0 11px rgba(255,93,108,.4); }
   .tp-amb { color:var(--amber); font-weight:700; text-shadow:0 0 10px rgba(245,180,60,.35); }
@@ -714,7 +715,8 @@ async function loadProducts() {
   items.forEach(p => {
     const was = STOCK_MEMORY[p.id];
     if (was === 0 && p.onHand > 0 && typeof ecoTick === 'function')
-      ecoTick('🏪', 'helix · ' + describe(p.title, p.price).name + ' back in stock', null, 'pos');
+      ecoTick('🏪', 'helix · ' + describe(p.title, p.price).name + ' back in stock', null, 'pos',
+              'stock.received', {variant: p.id});
     STOCK_MEMORY[p.id] = p.onHand;
   });
   localStorage.setItem('mart_stock_mem', JSON.stringify(STOCK_MEMORY));
@@ -902,7 +904,9 @@ async function payNow() {
     ecoTick(IDENTIFIED && PAY === 'card' ? '💳' : IDENTIFIED ? '🏦' : '🧾',
             'minimart · ' + (IDENTIFIED ? (PAY === 'main' ? 'account charged' : 'card captured') : 'payment captured')
             + ' · ' + bought,
-            '−' + money(r.amount), 'neg');
+            '−' + money(r.amount), 'neg', 'payment.captured',
+            {icon: IDENTIFIED && PAY === 'card' ? '💳' : IDENTIFIED ? '🏦' : '🧾',
+             rail: IDENTIFIED ? PAY : 'psp', who: IDENTIFIED ? 'you' : 'guest'});
     CART = {}; syncCartBadge();
     loadProducts(); loadMyOrders();
   } catch (e) {
@@ -996,7 +1000,8 @@ function openProduct(p) {
       }).then(r => r.json());
       sub.textContent = r.status === 'active' ? '✓ Subscribed · renews monthly' : 'Could not subscribe';
       if (r.status === 'active' && typeof ecoTick === 'function')
-        ecoTick('🔁', 'helix · ' + d.name + ' subscription started', money(p.price) + '/mo', 'amb');
+        ecoTick('🔁', 'helix · ' + d.name + ' subscription started', money(p.price) + '/mo', 'amb',
+                'subscription.started', {variant: p.id});
     } catch (e) { sub.textContent = 'Could not subscribe'; }
   };
   document.querySelector('#pd-overlay').classList.remove('hidden');
@@ -1039,7 +1044,7 @@ async function tapeFeedTick() {
     .filter(e => new Date(e.at).getTime() >= cutoff)
     .slice(0, 3).forEach(e => {
       const k = TAPE_KINDS[e.type];
-      if (k) ecoTick(k.icon, 'helix · ' + k.words(e), k.amt(e), k.tone);
+      if (k) ecoTick(k.icon, 'helix · ' + k.words(e), k.amt(e), k.tone, e.type, e);
     });
 }
 setInterval(tapeFeedTick, 5000);
@@ -1089,9 +1094,9 @@ setTimeout(ecoPulseTick, 800);
 // wire in the shop's own words. Every ecoTick lands in TWO places: the estate
 // bar's bottom toast (eco-nav.js), and the shop's own tape — the bank's
 // markee verbatim: trains that cross the bottom of the screen once, in order.
-const ecoTick = (icon, text, amount, tone) => {
+const ecoTick = (icon, text, amount, tone, kind, ev) => {
   document.dispatchEvent(new CustomEvent('eco:tick', {detail: {icon, text, amount, tone}}));
-  tapeTrain(icon, text, amount, tone);
+  tapeTrain(icon, text, amount, tone, kind, ev);
 };
 
 // THE MARQUEE · the bank's train-tape geometry kept in JS, never read back
@@ -1103,18 +1108,69 @@ const tapeBelt = document.getElementById('tk-belt');
 const tapeBar = document.getElementById('ticker-bar');
 const TAPE = { trains: [], next: 0, speed: 0.104, gap: 76, last: 0 };
 const tapeEsc = s => String(s == null ? '' : s).replace(/</g, '&lt;');
-function tapeTrain(icon, text, amount, tone) {
-  if (!tapeTrack) return;
+// callers pass amounts bank-style with their own sign (−€89); deltas re-sign
+const tapeMag = a => String(a == null ? '' : a).replace(/^[−+\-]/, '');
+
+// THE STORYBOARD · the bank's convention: a train reads the pipeline in
+// order — the POST, the SQL, the outbox, Kafka, then the ledger deltas —
+// never a bare "payment captured". ecoTick's 5th arg carries the event kind;
+// in-page moments (your own checkout) and the /api/events walker both say it.
+const TAPE_STORIES = {
+  'order.placed': (e, amt) => ({ h: '🛒',
+    s: ['POST /api/cart/checkout', 'reserve: SELECT … FOR UPDATE', 'BEGIN MAD',
+        'entries: onhand → reserved', 'INSERT outbox', 'COMMIT · saga open',
+        'relay → Kafka · shop.orders', 'acks=all ✓'],
+    d: [[String(e.variant || 'order').toUpperCase().replace(/^V-/, '').replace(/-/g, ' '), '×' + (e.qty || 1), 'amb'],
+        ...(amt ? [['GUEST', '−' + tapeMag(amt), 'neg']] : [])] }),
+  'payment.captured': (e, amt) => ({ h: e.icon || '🧾',
+    s: [e.rail === 'psp' ? 'POST /api/cart/checkout' : 'POST /api/cart/checkout · ' + (e.rail || 'bank'),
+        e.rail === 'psp' ? 'minipay: intent → capture' : 'bank: authorize+capture · idempotent',
+        'BEGIN MAD', 'INSERT outbox', 'COMMIT', 'relay → Kafka', 'acks=all ✓'],
+    d: amt ? [[(e.who || 'GUEST').toUpperCase(), '−' + tapeMag(amt), 'neg'], ['HELIX', '+' + tapeMag(amt), 'pos']] : [] }),
+  'subscription.started': e => ({ h: '🔁',
+    s: ['POST /api/subscribe', 'BEGIN MAD', 'INSERT subscriptions', 'first invoice posted',
+        'INSERT outbox', 'COMMIT'],
+    d: [[String(e.variant || 'sub').toUpperCase().replace(/^V-/, '').replace(/-/g, ' '), 'MONTHLY', 'amb']] }),
+  'subscription.renewed': (e, amt) => ({ h: '🔁',
+    s: ['billing: due subs polled', 'BEGIN MAD', 'invoice + charge on file rail',
+        'INSERT outbox', 'COMMIT', 'relay → Kafka ✓'],
+    d: amt ? [['SUBSCRIBER', '−' + tapeMag(amt), 'neg'], ['HELIX', '+' + tapeMag(amt), 'pos']] : [] }),
+  'subscription.churned': e => ({ h: '👋',
+    s: ['billing: rail declined twice', 'BEGIN MAD', 'UPDATE subscriptions · churned',
+        'INSERT outbox', 'COMMIT'],
+    d: [[String(e.variant || 'sub').toUpperCase().replace(/^V-/, '').replace(/-/g, ' '), 'ENDED', 'amb']] }),
+  'stock.received': e => ({ h: '🏪',
+    s: ['replenishment: below par', 'BEGIN MAD', 'entries: inbound → onhand',
+        'INSERT outbox', 'COMMIT'],
+    d: [[String(e.variant || 'shelf').toUpperCase().replace(/^V-/, '').replace(/-/g, ' '), '+STOCK', 'pos']] }),
+  'parcel.delivered': e => ({ h: '📦',
+    s: ['freight: out for delivery', 'POD signed', 'consumer: poll(shop.tracking)',
+        'event_key gate ✓', 'UPDATE shipments', 'COMMIT'],
+    d: [[String(e.variant || 'parcel').toUpperCase().replace(/^V-/, '').replace(/-/g, ' '), 'DELIVERED', 'pos']] }),
+  'shop.pulse': e => ({ h: e.icon || '🧬',
+    s: ['GET /api/pulse', 'pg: outbox · orders · invoices', 'read committed, live', 'no cache'],
+    d: [] }),
+};
+function tapeStoryTrain(st) {
   const el = document.createElement('div');
   el.className = 'tape-train';
-  el.innerHTML = `<span class="tp-h">${icon}</span><span class="tp-s">${tapeEsc(text)}</span>`
-    + (amount ? `<span class="tp-${tone === 'pos' || tone === 'neg' ? tone : 'amb'}">${tapeEsc(amount)}</span>` : '');
+  const bits = ['<span class="tp-h">' + st.h + '</span>'];
+  st.s.forEach((step, i) => { if (i) bits.push('<span class="tp-a">→</span>'); bits.push('<span class="tp-s">' + tapeEsc(step) + '</span>'); });
+  if (st.d.length) bits.push('<span class="tp-a">▸</span>');
+  st.d.forEach(d => bits.push('<span class="tp-' + d[2] + '">' + tapeEsc(d[0] + (d[1] ? ' ' + d[1] : '')) + '</span>'));
+  el.innerHTML = bits.join(' ');
   tapeTrack.appendChild(el);
   const w = el.offsetWidth;
   el.style.left = Math.max(TAPE.next, tapeBelt.clientWidth) + 'px';
   TAPE.next = Math.max(TAPE.next, tapeBelt.clientWidth) + w + TAPE.gap;
   TAPE.trains.push({ el, w });
   tapeBar.classList.add('on');
+}
+function tapeTrain(icon, text, amount, tone, kind, ev) {
+  const story = kind && TAPE_STORIES[kind];
+  if (story) return tapeStoryTrain(Object.assign(story(ev || {}, amount), { h: (ev && ev.icon) || story(ev || {}, amount).h }));
+  // one-liner fallback: icon + words + amount, same belt
+  return tapeStoryTrain({ h: icon, s: [text], d: amount ? [[tone === 'neg' ? 'YOU' : 'SHOP', amount, tone || 'amb']] : [] });
 }
 function tapeFrame(now) {
   const dt = Math.min(now - (TAPE.last || now), 120);
@@ -1192,7 +1248,8 @@ async function loadMyOrders() {
         const seen = JSON.parse(localStorage.getItem('mart_taped') || '[]');
         if (!seen.includes(o.id)) {
           seen.push(o.id); localStorage.setItem('mart_taped', JSON.stringify(seen.slice(-50)));
-          ecoTick('📦', 'minimart · ' + o.title + ' delivered', money(o.amount), 'pos');
+          ecoTick('📦', 'minimart · ' + o.title + ' delivered', money(o.amount), 'pos',
+                  'parcel.delivered', {variant: o.title});
         }
       }
       const marked = DEEP_ORDER && (o.id === DEEP_ORDER || o.bank_tx === DEEP_ORDER);
@@ -1276,9 +1333,9 @@ setInterval(loadOps, 3000);
 
 // The tape opens with the shop's own vital signs, then every real moment
 // crosses. A guest on a quiet shop still sees the markee slide.
-tapeTrain('🧬', 'helix supply · settled on a real ledger · free tracked shipping from Madrid', null, 'amb');
+tapeTrain('🧬', 'helix supply · settled on a real ledger · free tracked shipping from Madrid', null, 'amb', 'shop.pulse', {icon: '🧬'});
 fetch('/api/pulse').then(r => r.json()).then(p =>
-  tapeTrain('📦', p.orders + ' orders · ' + p.invoices + ' invoices · ' + p.stockMoves + ' stock moves on the books', null, 'amb')
+  tapeTrain('📦', p.orders + ' orders · ' + p.invoices + ' invoices · ' + p.stockMoves + ' stock moves on the books', null, 'amb', 'shop.pulse', {icon: '📦'})
 ).catch(() => {});
 // the parcel view keeps itself honest: freight moves parcels whether or not
 // this tab is watching, so the card re-asks politely rather than on click
