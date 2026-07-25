@@ -37,9 +37,6 @@
   #topnav { min-width:0; flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; }
   #topnav::-webkit-scrollbar { display:none; }
   #topnav .tab { flex:none; white-space:nowrap; }
-  /* the seam between this service's tabs and the rest of the estate ·
-     one product, one row, a hairline where the process boundary is */
-  .nav-sep { flex:none; width:1px; align-self:stretch; background:var(--line); margin:0 4px; }
 
   main { max-width:1100px; margin:0 auto; padding:22px; }
   section.hidden { display:none; }
@@ -293,20 +290,17 @@
 <header>
   <h1>mini<span>mart</span></h1>
   <span class="tag">a working shop whose customers are software</span>
+  <!-- TWO ROWS, TWO JOBS. The estate bar above names the SERVICES, once, and
+       marks which one you are in. This row names only the VIEWS inside the
+       shop, so it never says Shop (that is this service's own name upstairs,
+       so the view is called Catalogue), never says Pay or Bank (services),
+       and never carries GitHub, which is a link to source, not a view. The
+       repo lives in the footer, once. -->
   <nav id="topnav">
-    <button class="tab on" data-tab="shop">Shop</button>
+    <button class="tab on" data-tab="shop">Catalogue</button>
     <button class="tab" data-tab="ops">Operations</button>
-    <button class="tab" data-tab="sim">The customers</button>
+    <button class="tab" data-tab="sim">Customers</button>
     <button class="tab" data-tab="rev">Revenue</button>
-    <span class="nav-sep" aria-hidden="true"></span>
-    <!-- Cross-linking the estate is the eco-nav bar's job now, one bar served
-         by auth for every app. This row carries the shop's OWN sections plus
-         exactly one state-carrying partner: the processor that holds this
-         shop's money. Re-adding Bank/Trade/Portal pills here would be the
-         same link twice on one screen. -->
-    <a class="tab" href="https://pay.b4rruf3t.com">Pay</a>
-    <span class="nav-sep" aria-hidden="true"></span>
-    <a class="tab" href="https://github.com/igorfyago/minimart" target="_blank">GitHub</a>
   </nav>
 </header>
 

@@ -23,17 +23,8 @@
   h1 { font-size:17px; margin:0; font-weight:650; }
   h1 span { color:var(--accent); }
   .tag { color:var(--dim); font-size:12.5px; }
-  nav { display:flex; gap:6px; margin-left:auto; }
-  .tab { background:none; border:1px solid var(--line); color:var(--dim); padding:6px 16px;
-    border-radius:999px; font:600 13px system-ui; cursor:pointer; text-decoration:none; }
-  .tab.on { background:var(--accent); border-color:var(--accent); color:#fff; }
-  /* ONE tab row, the bank's convention: on overflow the row scrolls inside
-     the header instead of wrapping or stretching the page. */
-  #topnav { min-width:0; overflow-x:auto; scrollbar-width:none; }
-  #topnav::-webkit-scrollbar { display:none; }
-  #topnav .tab { flex:none; white-space:nowrap; }
-  /* the seam between this service and the rest of the estate */
-  .nav-sep { flex:none; width:1px; align-self:stretch; background:var(--line); margin:0 4px; }
+  /* No app pill row here: one view, so nothing to switch between. The pill,
+     tab-row and seam rules went with the markup rather than sitting dead. */
   main { padding:22px; max-width:1120px; margin:0 auto; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin-bottom:16px; }
   h2 { font-size:15px; margin:0 0 4px; font-weight:700; }
@@ -65,15 +56,11 @@
 <header>
   <h1>mini<span>pay</span></h1>
   <span class="tag">authorize, capture, void · and an idempotency layer that means it</span>
-  <!-- minipay is a single view, so it has no own tabs: the wordmark on the
-       left is the current marker. Cross-linking the estate is the eco-nav
-       bar's job; this row keeps only the one state-carrying partner · the
-       merchant this processor clears for · and the repo. -->
-  <nav id="topnav">
-    <a class="tab" href="https://mart.b4rruf3t.com">Mart</a>
-    <span class="nav-sep" aria-hidden="true"></span>
-    <a class="tab" href="https://github.com/igorfyago/minimart" target="_blank">GitHub</a>
-  </nav>
+  <!-- NO PILL ROW, deliberately. The estate bar above names the services and
+       marks that you are in Pay; this app has exactly ONE view, and a row
+       holding a single pill that can never turn off is decoration, not
+       navigation. Mart is a service (the bar's job) and GitHub is source,
+       not a view, so neither belongs here. The wordmark is the marker. -->
 </header>
 
 <main>
