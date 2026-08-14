@@ -7,6 +7,16 @@
 <link rel="preconnect" href="https://auth.b4rruf3t.com">
 <link rel="preload" href="https://auth.b4rruf3t.com/eco-nav.js" as="script">
 <style>
+/* Estate band: reserved STATICALLY so the very first paint already sits under
+   the bar. Must match --eco-nav-h in eco-nav.js (48px). The script re-asserts
+   the same rule, but a deferred script can lose the race to first paint on a
+   big document, and the whole page then shoves down by the bar height · that
+   was the load jump. Static CSS cannot lose that race. */
+html { padding-top:48px; }
+html::before { content:""; position:fixed; top:0; left:0; right:0; height:48px;
+  background:rgba(13,17,23,.95); border-bottom:1px solid #21262d;
+  z-index:2147482998; pointer-events:none; }
+
   /* ------------------------------------------------------------------------
      THE HOUSE STYLE, TAKEN FROM minibank VERBATIM.
      Same tokens, same type scale, same card and pill treatment, same accents.
