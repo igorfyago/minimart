@@ -90,6 +90,20 @@ public final class MartApi {
         try (var in = MartApi.class.getResourceAsStream("/web" + path)) {
             if (in == null) { send(ex, 404, "{\"error\":\"not found\"}"); return; }
             byte[] b = in.readAllBytes();
+            // Product art holds for a week in any cache · it shipped with headers
+            // so bare that browsers re-downloaded every PNG on every view.
+            // Documents revalidate on every use (a deploy must never leave a
+            // stale page behind), and the ETag turns that revalidation into a
+            // 304 header exchange instead of a re-download.
+            String etag = "\"" + Integer.toHexString(java.util.Arrays.hashCode(b)) + "\"";
+            ex.getResponseHeaders().set("ETag", etag);
+            ex.getResponseHeaders().set("Cache-Control",
+                    type.startsWith("image/") ? "public, max-age=604800" : "no-cache");
+            if (etag.equals(ex.getRequestHeaders().getFirst("If-None-Match"))) {
+                ex.sendResponseHeaders(304, -1);
+                ex.close();
+                return;
+            }
             ex.getResponseHeaders().set("Content-Type", type);
             ex.sendResponseHeaders(200, b.length);
             ex.getResponseBody().write(b);

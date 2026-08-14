@@ -66,6 +66,16 @@ public final class PayApi {
         try (var in = PayApi.class.getResourceAsStream("/web" + path)) {
             if (in == null) { send(ex, 404, err("not found")); return; }
             byte[] b = in.readAllBytes();
+            // Same contract as the shop: documents revalidate every use, the
+            // ETag makes that a 304 instead of a re-download.
+            String etag = "\"" + Integer.toHexString(java.util.Arrays.hashCode(b)) + "\"";
+            ex.getResponseHeaders().set("ETag", etag);
+            ex.getResponseHeaders().set("Cache-Control", "no-cache");
+            if (etag.equals(ex.getRequestHeaders().getFirst("If-None-Match"))) {
+                ex.sendResponseHeaders(304, -1);
+                ex.close();
+                return;
+            }
             ex.getResponseHeaders().set("Content-Type",
                     path.endsWith(".css") ? "text/css" : "text/html; charset=utf-8");
             ex.sendResponseHeaders(200, b.length);

@@ -61,6 +61,15 @@ public final class FreightApi {
         try (var in = FreightApi.class.getResourceAsStream("/web_freight/console.html")) {
             if (in == null) { respond(x, 404, "{}"); return; }
             byte[] page = in.readAllBytes();
+            // Estate contract: documents revalidate every use, 304 when unchanged.
+            String etag = "\"" + Integer.toHexString(java.util.Arrays.hashCode(page)) + "\"";
+            x.getResponseHeaders().set("ETag", etag);
+            x.getResponseHeaders().set("Cache-Control", "no-cache");
+            if (etag.equals(x.getRequestHeaders().getFirst("If-None-Match"))) {
+                x.sendResponseHeaders(304, -1);
+                x.close();
+                return;
+            }
             x.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
             x.sendResponseHeaders(200, page.length);
             try (OutputStream os = x.getResponseBody()) { os.write(page); }
